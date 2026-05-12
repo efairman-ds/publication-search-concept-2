@@ -1,0 +1,42 @@
+// 30 realistic therapeutic area / disease workspaces, sorted alphabetically
+export const WORKSPACES = [
+  "Alzheimer's Disease",
+  'Amyotrophic Lateral Sclerosis',
+  'Atrial Fibrillation',
+  'Breast Cancer',
+  'Cardiology',
+  'Chronic Kidney Disease',
+  'Colorectal Cancer',
+  'COPD',
+  "Crohn's Disease",
+  'Diffuse Large B-Cell Lymphoma',
+  'Endocrinology',
+  'Gastroenterology',
+  'Glioblastoma',
+  'Heart Failure',
+  'Hematology',
+  'Hepatocellular Carcinoma',
+  'Immunotherapy',
+  'Infectious Disease',
+  'Lupus Erythematosus',
+  'Melanoma',
+  'Multiple Myeloma',
+  'Multiple Sclerosis',
+  'Neurology',
+  'Non-Small Cell Lung Cancer',
+  'Oncology',
+  'Ovarian Cancer',
+  "Parkinson's Disease",
+  'Prostate Cancer',
+  'Psychiatry',
+  'Rheumatoid Arthritis',
+].sort((a, b) => a.localeCompare(b));
+
+// Five pinned recently-viewed workspaces shown in the sidebar
+export const RECENTLY_VIEWED = [
+  'Oncology',
+  'Multiple Sclerosis',
+  'Breast Cancer',
+  'Heart Failure',
+  'Rheumatoid Arthritis',
+];

@@ -1,0 +1,66 @@
+@property --cb-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* 3 rotations (1080°) over first 60% of cycle (12s at 4s/loop), then hold */
+@keyframes cb-orbit-rotate {
+  0%   { --cb-angle: 0deg;    }
+  60%  { --cb-angle: 1080deg; }
+  100% { --cb-angle: 1080deg; }
+}
+
+/* Visible through 3 loops → 1s fade → 5s pause → 1s fade in */
+@keyframes cb-orbit-opacity {
+  0%   { opacity: 1; }
+  60%  { opacity: 1; }
+  65%  { opacity: 0; }
+  90%  { opacity: 0; }
+  95%  { opacity: 1; }
+  100% { opacity: 1; }
+}
+
+/* ── Two comet-trail animated border ── */
+
+.cb-cta-outer {
+  position: relative;
+  border-radius: 16px;
+  padding: 2px;
+  background: #d1d4e3;
+}
+
+.cb-cta-outer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  background: conic-gradient(
+    from var(--cb-angle),
+    /* Comet A — tip at 0° */
+    #c4b5fd  0%,
+    #a78bfa  2%,
+    #7c3aed  7%,
+    #4a56a8  13%,
+    #d1d4e3  20%,
+    /* Gap */
+    #d1d4e3  50%,
+    /* Comet B — tip at 180° */
+    #c4b5fd  50%,
+    #a78bfa  52%,
+    #7c3aed  57%,
+    #4a56a8  63%,
+    #d1d4e3  70%,
+    /* Gap */
+    #d1d4e3  100%
+  );
+  animation:
+    cb-orbit-rotate 20s linear infinite,
+    cb-orbit-opacity 20s linear infinite;
+}
+
+.cb-cta-inner {
+  position: relative;
+  border-radius: 14px;
+  background: #d1d4e3;
+}
