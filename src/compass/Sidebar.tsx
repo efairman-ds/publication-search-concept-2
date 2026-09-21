@@ -119,6 +119,7 @@ type Props = {
   onWorkspacesEnter: () => void;
   onOtherNavItemEnter: () => void;
   favouriteNames?: string[];
+  hideNav?: boolean;
 };
 
 export default function Sidebar({
@@ -129,6 +130,7 @@ export default function Sidebar({
   onWorkspacesEnter,
   onOtherNavItemEnter,
   favouriteNames = [],
+  hideNav = false,
 }: Props) {
   return (
     <Box
@@ -196,7 +198,7 @@ export default function Sidebar({
       </Box>
 
       {/* ── Primary nav items ── */}
-      <List disablePadding sx={{ display: 'flex', flexDirection: 'column', gap: '4px', p: 1, flexShrink: 0 }}>
+      {!hideNav && <List disablePadding sx={{ display: 'flex', flexDirection: 'column', gap: '4px', p: 1, flexShrink: 0 }}>
         {NAV_ITEMS.map(item => (
           <NavButton
             key={item.id}
@@ -227,7 +229,7 @@ export default function Sidebar({
             )}
           </NavButton>
         ))}
-      </List>
+      </List>}
 
       {/* ── Favourites section ── */}
       <Collapse in={isExpanded && favouriteNames.length > 0} timeout={220} unmountOnExit>
@@ -293,7 +295,7 @@ export default function Sidebar({
       </Collapse>
 
       {/* ── Recently Viewed section ── */}
-      <Collapse in={isExpanded} timeout={220} unmountOnExit={false}>
+      <Collapse in={isExpanded && !hideNav} timeout={220} unmountOnExit={false}>
         <Box sx={{ px: 1, pt: 2, pb: 0.5 }}>
           <Typography
             variant="overline"

@@ -5,9 +5,7 @@ import { ThemeProvider } from '@mui/material/styles';
 import { theme } from './theme';
 import Sidebar from './Sidebar';
 import WorkspaceFlyout from './WorkspaceFlyout';
-import WorkspacesPage from './WorkspacesPage';
-import Onboarding from './Onboarding';
-import { SHARED_WORKSPACES } from './workspaceData';
+import PublicationSearchPage from './PublicationSearchPage';
 
 const COLLAPSED_WIDTH = 72;
 const EXPANDED_WIDTH  = 220;
@@ -16,19 +14,7 @@ const CLOSE_DELAY_MS  = 150;
 function CompassDemoInner() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [flyoutOpen,  setFlyoutOpen]  = useState(false);
-  const [activeNavId, setActiveNavId] = useState('home');
-  const [favouriteIds, setFavouriteIds] = useState<string[]>([]);
-  const [showOnboarding, setShowOnboarding] = useState(
-    () => localStorage.getItem('compass_onboarding_complete') !== 'true'
-  );
-
-  const favouriteNames = favouriteIds
-    .map(id => SHARED_WORKSPACES.find(w => w.id === id)?.name)
-    .filter((n): n is string => !!n);
-
-  const handleToggleFavourite = useCallback((id: string) => {
-    setFavouriteIds(prev => prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id]);
-  }, []);
+  const [activeNavId, setActiveNavId] = useState('search');
 
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -58,10 +44,6 @@ function CompassDemoInner() {
 
   return (
     <Box sx={{ display: 'flex', height: '100vh', bgcolor: 'background.default' }}>
-      {showOnboarding && (
-        <Onboarding onComplete={() => setShowOnboarding(false)} />
-      )}
-
       <Sidebar
         isExpanded={sidebarOpen}
         activeNavId={activeNavId}
@@ -69,7 +51,6 @@ function CompassDemoInner() {
         onMouseLeave={handleSidebarLeave}
         onWorkspacesEnter={handleWorkspacesEnter}
         onOtherNavItemEnter={handleOtherNavItemEnter}
-        favouriteNames={favouriteNames}
       />
 
       <WorkspaceFlyout
@@ -79,11 +60,7 @@ function CompassDemoInner() {
         onMouseLeave={handleFlyoutLeave}
       />
 
-      <WorkspacesPage
-        sharedWorkspaces={SHARED_WORKSPACES}
-        favouriteIds={favouriteIds}
-        onToggleFavourite={handleToggleFavourite}
-      />
+      <PublicationSearchPage />
     </Box>
   );
 }

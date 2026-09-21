@@ -1,5 +1,6 @@
 {
-  "name": "compass-onboarding",
+  "name": "publication-search-concept-2",
+  "description": "Compass's guided first-time onboarding flow — a multi-step walkthrough shown before the workspaces list.",
   "private": true,
   "version": "0.0.0",
   "type": "module",
