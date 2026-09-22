@@ -6,8 +6,6 @@ import Checkbox from '@mui/material/Checkbox';
 import CircularProgress from '@mui/material/CircularProgress';
 import ClickAwayListener from '@mui/material/ClickAwayListener';
 import Collapse from '@mui/material/Collapse';
-import Drawer from '@mui/material/Drawer';
-import Fade from '@mui/material/Fade';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import OutlinedInput from '@mui/material/OutlinedInput';
@@ -21,9 +19,9 @@ import {
   Bank,
   CaretDown,
   CaretUp,
-  Check,
   Info,
   MagnifyingGlass,
+  Plus,
   UsersThree,
   X,
 } from '@phosphor-icons/react';
@@ -53,23 +51,42 @@ function formatCount(n: number): string {
   return n.toLocaleString('en-US');
 }
 
+/** The one truncation rule every concept chip uses (RemovableChip,
+ *  SynonymOption, ConceptSummaryChip) — a fixed character count rather
+ *  than a pixel-width CSS ellipsis, so a chip's visible length is the
+ *  same regardless of which characters happen to be wide or narrow. The
+ *  full, untruncated label is always still available via each chip's own
+ *  Tooltip. */
+const CONCEPT_CHIP_MAX_CHARS = 15;
+function truncateConceptLabel(label: string): string {
+  return label.length > CONCEPT_CHIP_MAX_CHARS ? `${label.slice(0, CONCEPT_CHIP_MAX_CHARS)}…` : label;
+}
+
 const STOPWORDS = new Set([
   'and', 'or', 'not', 'the', 'of', 'for', 'with', 'in', 'on', 'a', 'an', 'to', 'vs', 'from',
   // Generic command scaffolding in a full-sentence query ("show me the
   // publications of X") — carries no concept meaning of its own, same
   // category as the words above rather than a leftover "Metadata" concept.
-  'show', 'me', 'publications', 'publication',
+  'show', 'me', 'publications', 'publication', 'documents', 'document', 'provide', 'papers', 'paper',
+  // Generic "these are patients" scaffolding around a population
+  // descriptor ("elderly patients", "women", "pediatric patients") — the
+  // descriptor itself is what's meaningful and is what actually gets
+  // recognised (see extractPopulationMatches); bare "patients" alongside
+  // it carries no search meaning of its own.
+  'patients', 'patient',
   // Generic labels for an identifier/title the user is about to name
   // (e.g. "publications with DOI 10.1016/...") rather than a search term
   // in their own right — the identifier/title itself is picked up by
   // extractDocumentIdentifierMatch/extractTitleMatch instead.
-  'doi',
+  'doi', 'dois',
   // Realistic HCP/Medical Affairs phrasing carries a lot of this kind of
   // scaffolding around the actual concept ("I want to track...", "What
   // are the relevant publications... for the indication X?", "the year
-  // 2026") — none of it is itself a search term, same treatment as the
-  // command scaffolding above.
+  // 2026", "the publications associated with these DOIs") — none of it
+  // is itself a search term, same treatment as the command scaffolding
+  // above.
   'want', 'track', 'about', 'all', 'what', 'are', 'relevant', 'indication', 'year', 'years', 'find',
+  'associated', 'these', 'those',
 ]);
 
 /** Splits a natural-language query into its meaningful words, so "nivolumab in
@@ -95,6 +112,18 @@ interface FilterOptions {
    *  term from here and narrows/broadens results accordingly. When absent
    *  (or empty), falls back to tokenising `queryText` itself. */
   orTerms?: string[];
+  /** An extra, alternative way to satisfy the *same* OR-matching step
+   *  orTerms drives — a publication passes if it matches any orTerm, OR
+   *  this. Used for combination-drug "broad" search scope (see the page
+   *  component's combinationScope): a publication discussing both of a
+   *  combination drug's active ingredients in close proximity should
+   *  count as a hit even when the trade name itself never appears (so a
+   *  plain orTerm for the trade name alone wouldn't catch it). Only
+   *  applies alongside a non-empty orTerms — deliberately not a way to
+   *  match publications when the user has removed every concept, which
+   *  should still mean "no criteria left, show everything" (see orTerms
+   *  above), not "fall back to this instead." */
+  orPredicate?: (p: SearchPublication) => boolean;
   /** AND-narrowing exact substring — e.g. a resolved ambiguity sub-category's
    *  qualifying phrase. Unlike orTerms, this must always be present. */
   requiredPhrase?: string;
@@ -122,7 +151,10 @@ function filterPublications(queryText: string, publicationFilter: PublicationFil
     // not silently fall back to re-matching the original, un-edited query.
     const orTerms = options.orTerms.map((t) => t.toLowerCase());
     if (orTerms.length > 0) {
-      list = list.filter((p) => { const h = publicationHaystack(p); return orTerms.some((t) => h.includes(t)); });
+      list = list.filter((p) => {
+        const h = publicationHaystack(p);
+        return orTerms.some((t) => h.includes(t)) || (options.orPredicate?.(p) ?? false);
+      });
     }
   } else if (q) {
     const terms = significantTerms(q);
@@ -146,9 +178,22 @@ function filterPublications(queryText: string, publicationFilter: PublicationFil
 
 // ── Org badge (top-right) ─────────────────────────────────────────────────────
 
-function OrgBadge() {
+/** `visible` false once the slim layout takes over — rendered via opacity
+ *  rather than conditionally unmounted, and absolutely positioned rather
+ *  than a normal-flow flex child, so hiding it can never shift anything
+ *  else in the column. A plain conditional unmount changes the flex
+ *  column's flow instantly with no way to animate that, which used to
+ *  read as everything below it — the "Find publications" heading
+ *  included — jumping upward the moment "View all publications" was
+ *  clicked, instead of fading out in place. Positioned against the
+ *  content column below, which is given `position: relative` for
+ *  exactly this. */
+function OrgBadge({ visible }: { visible: boolean }) {
   return (
     <Box sx={{
+      position: 'absolute',
+      top: '24px',
+      right: 6,
       display: 'flex',
       alignItems: 'center',
       gap: 0.75,
@@ -157,11 +202,9 @@ function OrgBadge() {
       px: 2,
       py: 1,
       whiteSpace: 'nowrap',
-      alignSelf: 'flex-end',
-      // Cancels out the flex column's own 32px gap above this item, so the
-      // page's own top padding is the only thing determining how far this
-      // sits from the viewport top (see the page component's `pt`).
-      mt: '-32px',
+      opacity: visible ? 1 : 0,
+      transition: 'opacity 0.5s ease',
+      pointerEvents: visible ? 'auto' : 'none',
     }}>
       <Bank size={18} color="#383f45" />
       <Typography sx={{ fontSize: 14, fontWeight: 500, color: '#383f45', letterSpacing: '-0.01em' }}>
@@ -1030,6 +1073,7 @@ function ExpandablePublicationPreview({
  *  only the input itself needed to stop being swapped. */
 function SlimSearchBar({
   onBack,
+  showFilters,
   publicationFilter,
   onPublicationFilterChange,
   sortKey,
@@ -1037,6 +1081,12 @@ function SlimSearchBar({
   onSort,
 }: {
   onBack: () => void;
+  /** The filter/sort controls only make sense once there's an actual list
+   *  to filter — a committed search or "View all publications" — not on
+   *  the plain landing state. The bar itself (this whole component) stays
+   *  mounted and visible regardless; only this one row's content is
+   *  gated. */
+  showFilters: boolean;
   publicationFilter: PublicationFilter;
   onPublicationFilterChange: (f: PublicationFilter) => void;
   sortKey: SortKey;
@@ -1073,16 +1123,20 @@ function SlimSearchBar({
         <Box aria-hidden sx={{ width: '420px', height: '40px', flexShrink: 0 }} />
 
         {/* Pushed to this row's own far right, within the reserved space
-            above. */}
-        <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center' }}>
-          <FilterControls
-            publicationFilter={publicationFilter}
-            onPublicationFilterChange={onPublicationFilterChange}
-            sortKey={sortKey}
-            sortDir={sortDir}
-            onSort={onSort}
-          />
-        </Box>
+            above. Only relevant once there's a list to filter — hidden on
+            the plain landing state, shown for a committed search or
+            "View all publications" (see showFilters). */}
+        {showFilters ? (
+          <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center' }}>
+            <FilterControls
+              publicationFilter={publicationFilter}
+              onPublicationFilterChange={onPublicationFilterChange}
+              sortKey={sortKey}
+              sortDir={sortDir}
+              onSort={onSort}
+            />
+          </Box>
+        ) : null}
       </Box>
 
       {/* "Back to search" isn't part of the search-bar/filters alignment
@@ -1153,38 +1207,48 @@ function SearchLandingCard({
       gap: 2,
     }}>
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+        {/* Never wrapped in an opacity fade (see the page component,
+            immediately above this card) — once docked, this escapes via
+            its own `position: fixed` to stay visible/anchored in the slim
+            bar, and opacity on an ancestor would still apply to it despite
+            that; only the button and helper text below fade with the rest
+            of this card's contents. */}
         <SearchCapsule value={query} onChange={onQueryChange} onSubmit={onSubmit} docked={docked} />
-        <Button
-          onClick={onSubmit}
-          disabled={!query.trim()}
-          startIcon={<MagnifyingGlass size={17} />}
-          disableElevation
-          sx={{
-            flexShrink: 0,
-            bgcolor: '#4a56a8',
-            color: '#fff',
-            fontSize: 15,
-            fontWeight: 600,
-            letterSpacing: '-0.01em',
-            borderRadius: '8px',
-            px: 3,
-            height: '56px',
-            textTransform: 'none',
-            whiteSpace: 'nowrap',
-            '&:hover': { bgcolor: '#3d4891' },
-            // Same disabled treatment used elsewhere for this button's colour
-            // (e.g. AddBenchmarkModal's primary CTA): dim in place rather than
-            // switching to MUI's default disabled grey.
-            '&.Mui-disabled': { bgcolor: '#4a56a8', color: '#fff', opacity: 0.4, cursor: 'not-allowed' },
-          }}
-        >
-          Find publications
-        </Button>
+        <Box sx={{ flexShrink: 0, opacity: docked ? 0 : 1, transition: 'opacity 0.5s ease' }}>
+          <Button
+            onClick={onSubmit}
+            disabled={!query.trim()}
+            startIcon={<MagnifyingGlass size={17} />}
+            disableElevation
+            sx={{
+              flexShrink: 0,
+              bgcolor: '#4a56a8',
+              color: '#fff',
+              fontSize: 15,
+              fontWeight: 600,
+              letterSpacing: '-0.01em',
+              borderRadius: '8px',
+              px: 3,
+              height: '56px',
+              textTransform: 'none',
+              whiteSpace: 'nowrap',
+              '&:hover': { bgcolor: '#3d4891' },
+              // Same disabled treatment used elsewhere for this button's colour
+              // (e.g. AddBenchmarkModal's primary CTA): dim in place rather than
+              // switching to MUI's default disabled grey.
+              '&.Mui-disabled': { bgcolor: '#4a56a8', color: '#fff', opacity: 0.4, cursor: 'not-allowed' },
+            }}
+          >
+            Find publications
+          </Button>
+        </Box>
       </Box>
 
-      <Typography sx={{ fontSize: 13, color: 'text.secondary', letterSpacing: '-0.01em', textAlign: 'left', mt: -1 }}>
-        Search naturally. Compass handles complex search logic for you.
-      </Typography>
+      <Box sx={{ opacity: docked ? 0 : 1, transition: 'opacity 0.5s ease' }}>
+        <Typography sx={{ fontSize: 13, color: 'text.secondary', letterSpacing: '-0.01em', textAlign: 'left', mt: -1 }}>
+          Search naturally. Compass handles complex search logic for you.
+        </Typography>
+      </Box>
     </Box>
   );
 }
@@ -1194,9 +1258,13 @@ function SearchLandingCard({
 function BooleanInfoBar() {
   return (
     <Box sx={{
-      // Matches the search card above exactly, so their left/right edges align.
+      // Matches the search card above exactly, so their left/right edges
+      // align. mx: 'auto' (not alignSelf, which only centers a *direct*
+      // flex child — this now sits one level deeper, inside a plain
+      // opacity-fade wrapper Box, see the page component) centers a
+      // fixed-width block regardless of what kind of parent it's in.
       width: '918px',
-      alignSelf: 'center',
+      mx: 'auto',
       display: 'flex',
       alignItems: 'center',
       gap: 1,
@@ -1241,6 +1309,12 @@ const CONCEPT_DICTIONARY: { pattern: string; category: string; label: string }[]
   { pattern: 'glp-1', category: 'Drug', label: 'GLP-1 therapies' },
   { pattern: 'sglt2', category: 'Drug', label: 'SGLT2 inhibitors' },
   { pattern: 'immune checkpoint inhibitor', category: 'Drug', label: 'Immune checkpoint inhibitors' },
+  // A combination-drug trade name — recognised here like any other Drug
+  // (so it shows as a normal chip and drives the default/"narrow" search
+  // same as always), but *also* registered in COMBINATION_DRUGS below
+  // with its known active ingredients, which is what additionally makes
+  // the narrow/broad search-scope control available for it.
+  { pattern: 'entresto', category: 'Drug', label: 'Entresto' },
   { pattern: 'kras', category: 'Biomarker', label: 'KRAS mutations' },
   { pattern: 'her2', category: 'Biomarker', label: 'HER2-positive' },
   // Disease and Indication are consolidated into one category (see
@@ -1289,6 +1363,106 @@ function interpretQuery(query: string): { pattern: string; category: string; lab
     }
   }
   return out;
+}
+
+/** Population/demographic descriptors — sex/gender, age group, pregnancy
+ *  — recognised as their own "Other" concept (see computeConceptState):
+ *  a valid search criterion in its own right, but not a Drug, Disease,
+ *  or Biomarker, so it's deliberately not just another CONCEPT_DICTIONARY
+ *  entry. Matched with a word-boundary regex rather than
+ *  CONCEPT_DICTIONARY's plain substring check — several of these
+ *  (`men`/`man`, `male`) would otherwise false-positive inside common,
+ *  unrelated words ("treatment", "government", "female", "management")
+ *  purely because the letters happen to appear in sequence. */
+const POPULATION_PATTERNS: { pattern: RegExp; label: string }[] = [
+  { pattern: /\bwomen\b/i, label: 'Women' },
+  { pattern: /\bwoman\b/i, label: 'Women' },
+  { pattern: /\bfemales?\b/i, label: 'Female patients' },
+  { pattern: /\bmen\b/i, label: 'Men' },
+  { pattern: /\bman\b/i, label: 'Men' },
+  { pattern: /\bmales?\b/i, label: 'Male patients' },
+  { pattern: /\bpregnant\b/i, label: 'Pregnant patients' },
+  { pattern: /\belderly\b/i, label: 'Elderly patients' },
+  { pattern: /\bgeriatric\b/i, label: 'Geriatric patients' },
+  { pattern: /\b(?:pediatric|paediatric)\b/i, label: 'Pediatric patients' },
+  { pattern: /\bchild(?:ren)?\b/i, label: 'Pediatric patients' },
+  { pattern: /\badolescents?\b/i, label: 'Adolescent patients' },
+  { pattern: /\binfants?\b/i, label: 'Infant patients' },
+  { pattern: /\bneonat(?:al|es?)\b/i, label: 'Neonatal patients' },
+  { pattern: /\badults?\b/i, label: 'Adult patients' },
+];
+
+/** Every population descriptor named in the query, each becoming its own
+ *  "Other" concept — same multi-match/dedup shape as
+ *  extractDocumentIdentifierMatches (more than one can appear, e.g.
+ *  "elderly women"), deduped by label so "women"/"woman" both appearing
+ *  doesn't produce two identical chips. */
+function extractPopulationMatches(query: string): { value: string; consumedText: string }[] {
+  const out: { value: string; consumedText: string }[] = [];
+  const seen = new Set<string>();
+  for (const { pattern, label } of POPULATION_PATTERNS) {
+    const match = query.match(pattern);
+    if (match && !seen.has(label)) {
+      seen.add(label);
+      out.push({ value: label, consumedText: match[0] });
+    }
+  }
+  return out;
+}
+
+/** A trade name whose active ingredients are both known — lets the
+ *  "broad" search-scope option (see the page component's
+ *  combinationScope) additionally surface publications that discuss
+ *  those ingredients together without ever naming the trade name; see
+ *  ingredientsInProximity. Ingredients are lowercase — matched as exact,
+ *  whole tokens, not substrings. */
+interface CombinationDrug {
+  tradeName: string;
+  ingredients: string[];
+}
+
+const COMBINATION_DRUGS: CombinationDrug[] = [
+  { tradeName: 'Entresto', ingredients: ['sacubitril', 'valsartan'] },
+];
+
+/** The trade name a query names, if it's a known combination drug —
+ *  purely a function of the query text, independent of whether the
+ *  user's currently chosen "narrow"/"broad" scope. */
+function findCombinationDrug(query: string): CombinationDrug | null {
+  const lower = query.toLowerCase();
+  return COMBINATION_DRUGS.find((d) => lower.includes(d.tradeName.toLowerCase())) ?? null;
+}
+
+/** How many words apart two active ingredients can be and still count as
+ *  "discussed together" for "broad" combination-drug search — a mock
+ *  stand-in for real proximity/co-occurrence search over full text. */
+const INGREDIENT_PROXIMITY_WINDOW = 12;
+
+/** True if every one of `ingredients` appears as a whole word somewhere
+ *  in `p`'s title + abstract, with the closest pair of occurrences (one
+ *  per ingredient, checked across every pair for 3+ ingredients) no more
+ *  than INGREDIENT_PROXIMITY_WINDOW words apart. Requires *every*
+ *  ingredient to appear at least once — a publication naming only one of
+ *  the two active ingredients never matches, regardless of proximity,
+ *  since there's nothing for it to be "close to" in the first place. */
+function ingredientsInProximity(p: SearchPublication, ingredients: string[]): boolean {
+  const words = `${p.title} ${p.abstract ?? ''}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const positions = ingredients.map((ingredient) => {
+    const indexes: number[] = [];
+    words.forEach((w, i) => { if (w === ingredient) indexes.push(i); });
+    return indexes;
+  });
+  if (positions.some((indexes) => indexes.length === 0)) return false;
+  for (let a = 0; a < positions.length; a++) {
+    for (let b = a + 1; b < positions.length; b++) {
+      let minDistance = Infinity;
+      for (const i of positions[a]) {
+        for (const j of positions[b]) minDistance = Math.min(minDistance, Math.abs(i - j));
+      }
+      if (minDistance > INGREDIENT_PROXIMITY_WINDOW) return false;
+    }
+  }
+  return true;
 }
 
 /** One concept a user can manually add via the Custom section's search
@@ -1549,17 +1723,34 @@ function extractAuthorAffiliationMatch(query: string): { value: string; consumed
   return null;
 }
 
-/** Recognises a DOI in the raw query text (e.g. "10.1056/NEJMoa2301842")
- *  as a "Document identifier" concept — matched exactly against the
- *  publication's own `doi` field (case-insensitive) rather than a
- *  haystack substring, since a DOI is meant to identify one specific
- *  publication, not just contribute a loose keyword. Trailing sentence
- *  punctuation (a period after the DOI, etc.) is trimmed off the match. */
-function extractDocumentIdentifierMatch(query: string): { value: string; consumedText: string } | null {
-  const match = query.match(/\b10\.\d{4,9}\/\S+/);
-  if (!match) return null;
-  const value = match[0].replace(/[.,;:]+$/, '');
-  return { value, consumedText: match[0] };
+/** Recognises every DOI in the raw query text as its own "Document
+ *  identifier" concept — matched exactly against the publication's own
+ *  `doi` field (case-insensitive) rather than a haystack substring, since
+ *  a DOI is meant to identify one specific publication, not just
+ *  contribute a loose keyword. Found the same way regardless of what (if
+ *  anything) precedes the bare `10.xxxx/yyyy` pattern — a full URL
+ *  (`https://doi.org/...`), a protocol-less one (`doi.org/...`), a
+ *  "DOI:"/"DOI" prefix, or nothing at all. A "doi.org/" (with or without
+ *  a leading protocol) prefix is matched as *part of* `consumedText`
+ *  (though never part of the returned `value`, which is always just the
+ *  bare DOI, matching how `doi` is stored on every publication) —
+ *  otherwise stripping only the bare DOI back out of the query for
+ *  leftover-word purposes would leave "doi"/"org"/"https" behind as
+ *  stray, meaningless "Metadata" concepts of their own. A bare "DOI:"
+ *  prefix doesn't need the same handling: "doi" is already a stopword
+ *  (see STOPWORDS), so it's never treated as a leftover word regardless.
+ *  A query can name more than one DOI (e.g. a comma- or "and"-separated
+ *  list) — each one is extracted and later turned into its own separate
+ *  concept/predicate, never merged into a single combined match.
+ *  Trailing sentence/list punctuation (a comma or period right after a
+ *  DOI, etc.) is trimmed off each match. */
+function extractDocumentIdentifierMatches(query: string): { value: string; consumedText: string }[] {
+  const matches = query.match(/\b(?:(?:https?:\/\/)?(?:dx\.)?doi\.org\/)?10\.\d{4,9}\/\S+/gi);
+  if (!matches) return [];
+  return matches.map((consumedText) => ({
+    value: consumedText.replace(/^(?:https?:\/\/)?(?:dx\.)?doi\.org\//i, '').replace(/[.,;:]+$/, ''),
+    consumedText,
+  }));
 }
 
 /** Recognises a search-by-title query as a "Title" concept — either an
@@ -1635,6 +1826,13 @@ interface ConceptState {
   /** AND-narrowing structured filters — one per surviving concept that
    *  matches on a field instead of a text term (see FilterOptions.predicates). */
   matchPredicates: Array<(p: SearchPublication) => boolean>;
+  /** Set when the query names a known combination drug's trade name —
+   *  purely a fact about the query text, independent of the page
+   *  component's own combinationScope choice. Drives whether the
+   *  narrow/broad search-scope control shows at all (see
+   *  CombinationScopeControl) and, when it's present, supplies the
+   *  ingredients that scope control's "broad" option searches for. */
+  combinationDrug: CombinationDrug | null;
 }
 
 function conceptKey(category: string, label: string): string {
@@ -1703,8 +1901,10 @@ function computeConceptState(
   customConcepts: CatalogConcept[],
 ): ConceptState {
   const matches = interpretQuery(query);
-  const documentIdentifierMatch = extractDocumentIdentifierMatch(query);
+  const documentIdentifierMatches = extractDocumentIdentifierMatches(query);
   const titleMatch = extractTitleMatch(query);
+  const populationMatches = extractPopulationMatches(query);
+  const combinationDrug = findCombinationDrug(query);
   // Scrubbed so a digit sequence inside an already-recognised DOI or
   // title (e.g. the "2045" inside "10.1016/S1470-2045(23)00142-9") can't
   // also be misread as an unrelated year/date-range or publication-type
@@ -1712,8 +1912,9 @@ function computeConceptState(
   // original `query`, so a recognisable drug/disease word inside a quoted
   // title is still surfaced as its own concept.
   let metadataSourceQuery = query;
-  if (documentIdentifierMatch) metadataSourceQuery = metadataSourceQuery.replace(documentIdentifierMatch.consumedText, ' ');
+  for (const m of documentIdentifierMatches) metadataSourceQuery = metadataSourceQuery.replace(m.consumedText, ' ');
   if (titleMatch) metadataSourceQuery = metadataSourceQuery.replace(titleMatch.consumedText, ' ');
+  for (const m of populationMatches) metadataSourceQuery = metadataSourceQuery.replace(m.consumedText, ' ');
   const metadataMatches = extractMetadataMatches(metadataSourceQuery);
   const primaryDisease = matches.find((m) => m.category === 'Disease / Indication')?.label ?? null;
 
@@ -1764,8 +1965,9 @@ function computeConceptState(
   for (const m of matches) significantTerms(m.pattern).forEach((w) => consumedWords.add(w));
   for (const m of metadataMatches) significantTerms(m.consumedText).forEach((w) => consumedWords.add(w));
   if (qualifierConsumedText) significantTerms(qualifierConsumedText).forEach((w) => consumedWords.add(w));
-  if (documentIdentifierMatch) significantTerms(documentIdentifierMatch.consumedText).forEach((w) => consumedWords.add(w));
+  for (const m of documentIdentifierMatches) significantTerms(m.consumedText).forEach((w) => consumedWords.add(w));
   if (titleMatch) significantTerms(titleMatch.consumedText).forEach((w) => consumedWords.add(w));
+  for (const m of populationMatches) significantTerms(m.consumedText).forEach((w) => consumedWords.add(w));
   const otherWords = significantTerms(query).filter((w) => !consumedWords.has(w));
 
   // Pushes every concept regardless of removedConceptKeys — `removed`
@@ -1790,11 +1992,17 @@ function computeConceptState(
       }
     }
   }
-  if (documentIdentifierMatch) {
-    const key = conceptKey('Document identifier', documentIdentifierMatch.value);
+  // Each DOI the query names becomes its own concept/chip, independently
+  // removable — but see matchPredicates below, where their individual
+  // predicates are OR'd together rather than each being AND'd in
+  // separately: a publication can only ever have one DOI, so requiring a
+  // match against *every* named DOI at once would always return nothing.
+  for (const m of documentIdentifierMatches) {
+    const key = conceptKey('Document identifier', m.value);
+    const doiValue = m.value;
     allConcepts.push({
-      key, category: 'Document identifier', label: documentIdentifierMatch.value, term: null,
-      predicate: (p) => p.doi.toLowerCase() === documentIdentifierMatch.value.toLowerCase(),
+      key, category: 'Document identifier', label: doiValue, term: null,
+      predicate: (p) => p.doi.toLowerCase() === doiValue.toLowerCase(),
       removed: removedConceptKeys.has(key),
     });
   }
@@ -1805,6 +2013,14 @@ function computeConceptState(
       predicate: (p) => p.title.toLowerCase().includes(titleMatch.value.toLowerCase()),
       removed: removedConceptKeys.has(key),
     });
+  }
+  // A population descriptor is a valid search criterion but isn't a
+  // Drug/Disease/Biomarker/Device — "Other" rather than forcing it into
+  // one of those, or leaving it to fall through as an undifferentiated
+  // "Metadata" leftover word like a truly unrecognised one would.
+  for (const m of populationMatches) {
+    const key = conceptKey('Other', m.value);
+    allConcepts.push({ key, category: 'Other', label: m.value, term: m.value.toLowerCase(), removed: removedConceptKeys.has(key) });
   }
   for (const m of metadataMatches) {
     const key = conceptKey('Metadata', m.label);
@@ -1831,9 +2047,20 @@ function computeConceptState(
 
   const active = allConcepts.filter((c) => !c.removed);
   const matchOrTerms = active.filter((c) => c.term).map((c) => c.term!.toLowerCase());
-  const matchPredicates = active.filter((c) => c.predicate).map((c) => c.predicate!);
+  // Document identifier predicates are combined with OR, not AND, into
+  // one predicate — filterPublications ANDs everything in matchPredicates
+  // together, and a publication can only ever have one DOI, so AND-ing
+  // two or more DOI predicates directly (one query naming several DOIs)
+  // would always match zero publications instead of the union of all of
+  // them. Every other predicate (Title, Metadata, ...) still ANDs
+  // normally against this combined one and against each other.
+  const activeDocIdPredicates = active.filter((c) => c.category === 'Document identifier' && c.predicate).map((c) => c.predicate!);
+  const otherPredicates = active.filter((c) => c.category !== 'Document identifier' && c.predicate).map((c) => c.predicate!);
+  const matchPredicates = activeDocIdPredicates.length > 0
+    ? [...otherPredicates, (p: SearchPublication) => activeDocIdPredicates.some((fn) => fn(p))]
+    : otherPredicates;
 
-  return { allConcepts, pendingClarification, filterQualifier, matchOrTerms, matchPredicates };
+  return { allConcepts, pendingClarification, filterQualifier, matchOrTerms, matchPredicates, combinationDrug };
 }
 
 /** One extracted concept's value, pill-styled, with a small × so the user
@@ -1852,20 +2079,21 @@ function RemovableChip({ label, onRemove }: { label: string; onRemove: () => voi
       alignItems: 'center',
       gap: 0.5,
       flexShrink: 0,
+      height: CONCEPT_CHIP_HEIGHT,
+      boxSizing: 'border-box',
       bgcolor: (t) => alpha(t.palette.primary.main, 0.1),
       border: '1px solid',
       borderColor: (t) => alpha(t.palette.primary.main, 0.24),
       borderRadius: '6px',
       pl: 1.25,
       pr: 0.75,
-      py: 0.5,
     }}>
       <Tooltip title={label} enterDelay={400} slotProps={tooltipSlotProps}>
         <Typography sx={{
           fontSize: 13, fontWeight: 600, color: 'primary.main', letterSpacing: '-0.01em',
-          maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          whiteSpace: 'nowrap',
         }}>
-          {label}
+          {truncateConceptLabel(label)}
         </Typography>
       </Tooltip>
       <Box
@@ -1888,179 +2116,128 @@ function RemovableChip({ label, onRemove }: { label: string; onRemove: () => voi
   );
 }
 
-/** Inline cap per category box — beyond this, concepts move into the
- *  "Show N more" flyout rather than crowding the banner. */
-const MAX_VISIBLE_CONCEPTS_PER_CATEGORY = 3;
+/** Shared shape for every category container in the expanded concept
+ *  details (see ConceptDetails) — CategoryBox and the "Add concept"
+ *  container both use this exact radius/padding so every container in
+ *  that row reads as the same kind of thing, differing only in
+ *  background. Padding is deliberately tight (proportional to a chip's
+ *  own size, not a generic card inset) so the container hugs its content
+ *  instead of reading as an oversized panel. */
+const CATEGORY_CONTAINER_RADIUS = '8px';
+const CATEGORY_CONTAINER_PADDING = { px: 1.25, py: 0.875 };
+/** Every label inside a category container — the category name itself
+ *  ("DRUG", "ADD CONCEPT", ...) and the inline "SYNONYMS" label — shares
+ *  this exact styling, so the two read as the same kind of thing rather
+ *  than one looking like an afterthought next to the other. Small, muted,
+ *  and all-caps on purpose: the label is a quiet cue, not competing with
+ *  the chips for attention. */
+const CATEGORY_LABEL_SX = { fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'text.disabled', whiteSpace: 'nowrap' } as const;
+/** Every concept chip — selected (RemovableChip), addable (SynonymOption),
+ *  and the collapsed summary's read-only chip (ConceptSummaryChip) — sets
+ *  this exact height explicitly, rather than letting padding and content
+ *  (a slightly larger label, an icon or not) settle it on their own. Text
+ *  and icons still vertically centre within it (via `alignItems: center`
+ *  on each chip's own flex root), so this is purely a floor/ceiling on
+ *  the box itself — the one thing that guarantees every chip lines up at
+ *  exactly the same height regardless of those per-chip differences. */
+const CONCEPT_CHIP_HEIGHT = '28px';
 
-/** One category's box — its label plus up to MAX_VISIBLE_CONCEPTS_PER_CATEGORY
- *  of its extracted concepts as removable chips. A real box (border, own
- *  background) rather than a bare label + row of standalone chips, so each
- *  category reads as one discrete, scannable unit. */
+/** One category — shown inside the banner's expanded state (see
+ *  InterpretedConceptsBanner), not gated behind any dropdown or popover
+ *  of its own. A white container (see CATEGORY_CONTAINER_*) gives each
+ *  category a clear edge without a border line, and hugs its own content
+ *  rather than stretching; several of these then sit side by side (see
+ *  ConceptDetails) rather than one per line.
+ *
+ *  Label row: the category name, plus — once at least one synonym has
+ *  actually been added to this category — a small "N concepts added"
+ *  caption at the far right of that same row (synonym-derived concepts
+ *  only; a category's originally-matched concept(s) don't count towards
+ *  this). Beneath that: every concept as a removable (blue, "×") chip,
+ *  immediately followed in the same wrapping row by any synonyms still
+ *  available to add, each as its own addable (green, "+") chip — no
+ *  "Synonyms:" text label; the colour/icon difference alone marks a chip
+ *  as not-yet-added, and clicking one promotes it into a blue chip in
+ *  this same row. */
 function CategoryBox({
   category,
   concepts,
   onRemove,
-  onShowMore,
-  footer,
+  addedSynonyms,
+  onAddSynonym,
 }: {
   category: string;
   concepts: DisplayConcept[];
   onRemove: (key: string) => void;
-  onShowMore: () => void;
-  /** Extra content rendered below the chip row, inside the same box — used
-   *  by the Custom category's inline search (see CustomConceptSearch) so
-   *  it inherits this exact shell/spacing rather than a separate one. */
-  footer?: ReactNode;
+  addedSynonyms: Record<string, string[]>;
+  onAddSynonym: (parentKey: string, synonym: string) => void;
 }) {
-  const visible = concepts.slice(0, MAX_VISIBLE_CONCEPTS_PER_CATEGORY);
-  const overflow = concepts.length - MAX_VISIBLE_CONCEPTS_PER_CATEGORY;
+  const synonymOptions = concepts
+    .filter((c) => parseSynonymConceptKey(c.key) === null)
+    .flatMap((c) => (CONCEPT_SYNONYMS[c.label] ?? [])
+      .filter((s) => !(addedSynonyms[c.key] ?? []).includes(s))
+      .map((synonym) => ({ parentKey: c.key, synonym })));
+  const addedCount = concepts.filter((c) => parseSynonymConceptKey(c.key) !== null).length;
+
   return (
     <Box sx={{
-      bgcolor: '#fff',
-      border: '1px solid',
-      borderColor: 'divider',
-      borderRadius: '10px',
-      px: 1.5,
-      py: 1.25,
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 0.75,
-      minWidth: 0,
+      bgcolor: '#fff', borderRadius: CATEGORY_CONTAINER_RADIUS, ...CATEGORY_CONTAINER_PADDING,
+      display: 'flex', flexDirection: 'column', gap: 0.75, minWidth: 0,
     }}>
-      <Typography sx={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'text.disabled', whiteSpace: 'nowrap' }}>
-        {category}
-      </Typography>
-      {concepts.length > 0 ? (
-        // nowrap — combined with each chip's own fixed-width truncation
-        // (see RemovableChip), this box stays exactly one line tall
-        // regardless of how many concepts it holds or how long their
-        // labels are, rather than wrapping onto a second line.
-        <Box sx={{ display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: 0.75 }}>
-          {visible.map((c) => <RemovableChip key={c.key} label={c.label} onRemove={() => onRemove(c.key)} />)}
-          {overflow > 0 ? (
-            <Box
-              role="button"
-              onClick={onShowMore}
-              sx={{
-                fontSize: 12, fontWeight: 600, color: 'primary.main', cursor: 'pointer',
-                flexShrink: 0, whiteSpace: 'nowrap', '&:hover': { color: '#3d4891' },
-              }}
-            >
-              Show {overflow} more
-            </Box>
-          ) : null}
-        </Box>
-      ) : null}
-      {footer}
-    </Box>
-  );
-}
-
-/** Opened via a category box's "Show N more" — every concept in that one
- *  category, each still removable the same way as the inline chips, so
- *  trimming a long tail (e.g. many "Metadata" leftovers) doesn't require
- *  cramming them all into the banner itself. */
-/** Opened via the Custom category box's "Show N more" specifically — same
- *  flyout shell as every other category (see CategoryMoreFlyout), just
- *  with a fuller header (a real title + a dynamic count, rather than the
- *  bare uppercase category label) and its own "add a concept" search and
- *  "Clear all" beneath the chips, since Custom is the one category whose
- *  members are user-managed rather than purely interpreted from the query. */
-function CustomFlyoutHeader({ count }: { count: number }) {
-  return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25, minWidth: 0 }}>
-      <Typography sx={{ fontSize: 14, fontWeight: 600, letterSpacing: '-0.01em', color: 'text.primary' }}>
-        Interpreted concepts
-      </Typography>
-      <Typography sx={{ fontSize: 13, color: 'text.secondary', letterSpacing: '-0.01em' }}>
-        {count > 0 ? `${count} custom concept${count === 1 ? '' : 's'} added to this search` : 'No custom concepts added'}
-      </Typography>
-    </Box>
-  );
-}
-
-function CategoryMoreFlyout({
-  open,
-  category,
-  concepts,
-  onRemove,
-  onClose,
-  activeConcepts,
-  onAddCustomConcept,
-  onClearAllCustom,
-}: {
-  open: boolean;
-  category: string | null;
-  concepts: DisplayConcept[];
-  onRemove: (key: string) => void;
-  onClose: () => void;
-  /** Every currently-active concept across all categories — only used to
-   *  drive the Custom flyout's own "add a concept" search (see
-   *  CustomConceptSearch), which needs the full picture to avoid
-   *  re-suggesting something already shown elsewhere in the banner. */
-  activeConcepts: DisplayConcept[];
-  onAddCustomConcept: (option: CatalogConcept) => void;
-  onClearAllCustom: () => void;
-}) {
-  const isCustom = category === 'Custom';
-  return (
-    // zIndex overrides MUI's default theme.zIndex.drawer (1200) — the
-    // fixed slim search bar (1300) and its docked capsule (1301) both sit
-    // above that, so without this override the flyout renders underneath
-    // them instead of over them.
-    <Drawer anchor="right" open={open} onClose={onClose} sx={{ zIndex: 1400 }} slotProps={{ paper: { sx: { width: 340 } } }}>
-      <Box sx={{ p: 2.5, display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 2 }}>
-          {isCustom ? (
-            <CustomFlyoutHeader count={concepts.length} />
-          ) : (
-            <Typography sx={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'text.disabled' }}>
-              {category}
-            </Typography>
-          )}
-          <Box
-            role="button"
-            aria-label="Close"
-            onClick={onClose}
-            sx={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: 'text.secondary', flexShrink: 0,
-              '&:hover': { color: 'text.primary' },
-            }}
-          >
-            <X size={16} />
-          </Box>
-        </Box>
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-            {concepts.map((c) => <RemovableChip key={c.key} label={c.label} onRemove={() => onRemove(c.key)} />)}
-          </Box>
-          {isCustom ? (
-            <>
-              <CustomConceptSearch
-                concepts={activeConcepts}
-                onAdd={onAddCustomConcept}
-                placeholder="Search or add a concept..."
-              />
-              {concepts.length > 0 ? (
-                <Box
-                  role="button"
-                  aria-label="Clear all custom concepts"
-                  onClick={onClearAllCustom}
-                  sx={{
-                    fontSize: 12, fontWeight: 600, letterSpacing: '-0.01em',
-                    color: 'text.disabled', cursor: 'pointer', alignSelf: 'flex-start',
-                    '&:hover': { color: 'text.secondary' },
-                  }}
-                >
-                  Clear all
-                </Box>
-              ) : null}
-            </>
-          ) : null}
-        </Box>
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5 }}>
+        <Typography sx={CATEGORY_LABEL_SX}>
+          {category}
+        </Typography>
+        {addedCount > 0 ? (
+          // All-caps like the category label itself (see CATEGORY_LABEL_SX),
+          // but a shade lighter and not bold — supporting metadata about
+          // the category, not another label competing with it or with the
+          // concept chips below for attention.
+          <Typography sx={{
+            fontSize: 10, fontWeight: 500, letterSpacing: '0.04em', textTransform: 'uppercase',
+            color: (t) => alpha(t.palette.text.disabled, 0.65), whiteSpace: 'nowrap',
+          }}>
+            {addedCount} concept{addedCount === 1 ? '' : 's'} added
+          </Typography>
+        ) : null}
       </Box>
-    </Drawer>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 0.75 }}>
+        {concepts.map((c) => <RemovableChip key={c.key} label={c.label} onRemove={() => onRemove(c.key)} />)}
+        {synonymOptions.map(({ parentKey, synonym }) => (
+          <SynonymOption key={synonym} label={synonym} onClick={() => onAddSynonym(parentKey, synonym)} />
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
+/** One concept, display-only — no remove control, no click behaviour —
+ *  used only in the banner's collapsed summary (see
+ *  InterpretedConceptsBanner). Same chip visual language as the
+ *  interactive RemovableChip (tint, border, truncation) so it still reads
+ *  as "a concept chip," just without the affordance to act on it; that
+ *  distinction is the point — the collapsed view is a summary to scan,
+ *  not something to edit. "Edit concepts" is how you get to the real,
+ *  editable chips (see CategoryBox). */
+function ConceptSummaryChip({ label }: { label: string }) {
+  return (
+    <Tooltip title={label} enterDelay={400} slotProps={tooltipSlotProps}>
+      <Typography sx={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        height: CONCEPT_CHIP_HEIGHT,
+        boxSizing: 'border-box',
+        bgcolor: (t) => alpha(t.palette.primary.main, 0.1),
+        border: '1px solid',
+        borderColor: (t) => alpha(t.palette.primary.main, 0.24),
+        borderRadius: '6px',
+        pl: 1.25, pr: 1.25,
+        fontSize: 13, fontWeight: 600, color: 'primary.main', letterSpacing: '-0.01em',
+        whiteSpace: 'nowrap',
+      }}>
+        {truncateConceptLabel(label)}
+      </Typography>
+    </Tooltip>
   );
 }
 
@@ -2097,23 +2274,86 @@ function relatedCatalogSuggestions(
   return [...prioritized, ...rest].slice(0, limit);
 }
 
-/** Inline "add a concept" control that lives inside the Custom category
- *  box (see InterpretedConceptsBanner) — a compact search rather than a
- *  modal, since adding one concept shouldn't feel like leaving the banner.
+/** All of the banner's category containers plus "Custom" (the add-a-
+ *  concept category), shown once the banner is expanded (see
+ *  InterpretedConceptsBanner) — never gated behind a dropdown or popover
+ *  of its own. Laid out as one horizontal, wrapping row — category
+ *  container → category container → ... → "Custom" — so several
+ *  categories sit side by side where there's room, rather than one per
+ *  line. "Custom" is the last item in that same row, kept visually
+ *  distinct (its own, slightly-off-white background — see its own Box
+ *  below) from the categories actually interpreted from the query, even
+ *  though it's right alongside them. */
+function ConceptDetails({
+  groups,
+  activeConcepts,
+  onAdd,
+  onRemove,
+  addedSynonyms,
+  onAddSynonym,
+}: {
+  groups: { category: string; concepts: DisplayConcept[] }[];
+  /** Every currently-active concept across all categories — passed through
+   *  to CustomConceptSearch so its suggestions never re-offer something
+   *  already shown elsewhere. */
+  activeConcepts: DisplayConcept[];
+  onAdd: (option: CatalogConcept) => void;
+  onRemove: (key: string) => void;
+  addedSynonyms: Record<string, string[]>;
+  onAddSynonym: (parentKey: string, synonym: string) => void;
+}) {
+  return (
+    <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 1.5 }}>
+      {groups.map((g) => (
+        <CategoryBox
+          key={g.category}
+          category={g.category}
+          concepts={g.concepts}
+          onRemove={onRemove}
+          addedSynonyms={addedSynonyms}
+          onAddSynonym={onAddSynonym}
+        />
+      ))}
+      {/* "Custom" — same container shape as every CategoryBox (radius,
+          padding, label-then-content), only the background differs, and
+          only very slightly (a flat off-white, not grey, not an
+          alpha-tinted mix of the page's own lavender-grey background),
+          so this reads as secondary/less prominent than the categories
+          actually interpreted from the query without any strong
+          contrast, border, or other kind of visual separator. Since the
+          banner itself already sits on a light tinted background
+          (alpha(primary,0.06) — see InterpretedConceptsBanner), this
+          stays close to that same lightness rather than a darker
+          off-white that would read as its own, more separate card. The
+          search field inside (see CustomConceptSearch) is pure white, so
+          it still stands out clearly against this slightly-off container
+          rather than blending into it. */}
+      <Box sx={{
+        bgcolor: '#FAFAF8',
+        borderRadius: CATEGORY_CONTAINER_RADIUS, ...CATEGORY_CONTAINER_PADDING,
+        display: 'flex', flexDirection: 'column', gap: 0.75, minWidth: 200,
+      }}>
+        <Typography sx={CATEGORY_LABEL_SX}>
+          Custom
+        </Typography>
+        <CustomConceptSearch concepts={activeConcepts} onAdd={onAdd} />
+      </Box>
+    </Box>
+  );
+}
+
+/** Compact "add a concept" search — the content of the "Add concept"
+ *  category in ConceptDetails (see above). Focusing the (empty) field
+ *  shows 5 related suggestions; typing searches the full catalog instead.
  *  Suggestions are computed from `concepts` (the banner's current, live
  *  display list) so anything already shown — matched from the query,
  *  added as a synonym, or already added here — never re-offers itself. */
 function CustomConceptSearch({
   concepts,
   onAdd,
-  placeholder = 'Add a concept...',
 }: {
   concepts: DisplayConcept[];
   onAdd: (option: CatalogConcept) => void;
-  /** Defaults to the banner's own copy — the Custom flyout (see
-   *  CategoryMoreFlyout) passes a slightly fuller "Search or add a
-   *  concept..." instead, without needing a second component. */
-  placeholder?: string;
 }) {
   const [inputValue, setInputValue] = useState('');
   const [open, setOpen] = useState(false);
@@ -2142,10 +2382,15 @@ function CustomConceptSearch({
 
   return (
     <ClickAwayListener onClickAway={() => setOpen(false)}>
-      <Box ref={anchorRef} sx={{ mt: 0.25 }}>
+      <Box ref={anchorRef}>
         <Box sx={{
           display: 'flex', alignItems: 'center', gap: 0.75,
-          bgcolor: (t) => alpha(t.palette.text.primary, 0.03),
+          // Pure white — deliberately distinct from the "Add concept"
+          // container's own subtle off-white background (see
+          // ConceptDetails), so the actual input field still reads
+          // clearly as a search field rather than blending into its
+          // surroundings.
+          bgcolor: '#fff',
           border: '1px solid', borderColor: 'divider', borderRadius: '6px',
           px: 1, py: 0.25,
         }}>
@@ -2155,7 +2400,7 @@ function CustomConceptSearch({
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onFocus={() => setOpen(true)}
-            placeholder={placeholder}
+            placeholder="Add a concept..."
             fullWidth
             sx={{
               '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
@@ -2214,10 +2459,17 @@ function CustomConceptSearch({
   );
 }
 
-/** One synonym still available to add, shown as a small tick-icon chip in
- *  Query details — clicking it promotes the synonym into its parent
- *  concept's category box above as its own active, removable chip (see
- *  the page component's handleAddSynonym), immediately re-running search. */
+// A synonym still available to add sits in the same chip row as its
+// parent concept, coloured differently (green, "+") from an already-added
+// concept (blue, "×" — see RemovableChip) so the two states read apart at
+// a glance without needing a separate "Synonyms:" text label.
+const SYNONYM_OPTION_COLOR = '#2e7d63';
+
+/** One synonym still available to add — sits directly in a CategoryBox's
+ *  chip row, right after its parent concept's own chip (see CategoryBox).
+ *  Clicking it promotes the synonym into that same row as its own active,
+ *  removable chip (see the page component's handleAddSynonym), immediately
+ *  re-running search. */
 function SynonymOption({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <Box
@@ -2228,93 +2480,171 @@ function SynonymOption({ label, onClick }: { label: string; onClick: () => void 
         display: 'flex',
         alignItems: 'center',
         gap: 0.5,
-        bgcolor: '#fff',
+        flexShrink: 0,
+        height: CONCEPT_CHIP_HEIGHT,
+        boxSizing: 'border-box',
+        bgcolor: alpha(SYNONYM_OPTION_COLOR, 0.1),
         border: '1px solid',
-        borderColor: 'divider',
+        borderColor: alpha(SYNONYM_OPTION_COLOR, 0.3),
         borderRadius: '6px',
-        px: 1,
-        py: 0.375,
+        // Same pl/pr pattern as RemovableChip (both end in an icon, so
+        // both give it slightly less padding than the text side).
+        pl: 1.25,
+        pr: 0.75,
         cursor: 'pointer',
-        '&:hover': { borderColor: (t) => alpha(t.palette.primary.main, 0.4), bgcolor: (t) => alpha(t.palette.primary.main, 0.05) },
+        '&:hover': { borderColor: alpha(SYNONYM_OPTION_COLOR, 0.5), bgcolor: alpha(SYNONYM_OPTION_COLOR, 0.16) },
       }}
     >
-      <Check size={11} weight="bold" color="#8d96a5" />
-      <Typography sx={{ fontSize: 12, fontWeight: 500, color: 'text.secondary', letterSpacing: '-0.01em' }}>
-        {label}
-      </Typography>
+      <Tooltip title={label} enterDelay={400} slotProps={tooltipSlotProps}>
+        <Typography sx={{ fontSize: 12, fontWeight: 600, color: SYNONYM_OPTION_COLOR, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
+          {truncateConceptLabel(label)}
+        </Typography>
+      </Tooltip>
+      <Plus size={11} weight="bold" color={SYNONYM_OPTION_COLOR} />
     </Box>
   );
 }
 
-/** Small muted pill marking a concept that's no longer active in the
- *  search — Query details keeps showing it (rather than dropping it from
- *  view entirely) so the user can always see what was originally
- *  interpreted; Undo (in the banner header) is how it comes back. */
-function RemovedBadge() {
+/** Turns true `delayMs` after `active` becomes true, and turns false the
+ *  instant `active` becomes false — used to fade the concepts banner/
+ *  results content in only once its fold-open Collapse has nearly
+ *  finished, while still fading it out immediately (no delay) on close.
+ *  Deliberately state-driven rather than a CSS `transition-delay`: the
+ *  Collapse each of these lives in uses `unmountOnExit`, so the opacity
+ *  Box itself fully unmounts and remounts between a close and the next
+ *  open even though the surrounding Collapse never does — and a
+ *  freshly-mounted element's first paint never animates, there's no
+ *  "previous frame" for a transition-delay to hold off from. Starting
+ *  `delayed` at false
+ *  unconditionally (regardless of `active`'s initial value) means even a
+ *  fresh mount that wants to be open renders hidden for one tick, then
+ *  gets a real second frame to fade in from — giving the CSS opacity
+ *  transition an actual before/after to animate between. The instant
+ *  reset-to-false on `active` going false is applied *during* render
+ *  (not from an effect) for the same reason `closingLinger` is: an effect
+ *  would lag by one committed, painted frame. */
+function useDelayedTrue(active: boolean, delayMs: number) {
+  const [delayed, setDelayed] = useState(false);
+  const prevActiveRef = useRef(active);
+  if (prevActiveRef.current !== active) {
+    if (!active) setDelayed(false);
+    prevActiveRef.current = active;
+  }
+  useEffect(() => {
+    if (!active) return;
+    const timeoutId = setTimeout(() => setDelayed(true), delayMs);
+    return () => clearTimeout(timeoutId);
+  }, [active, delayMs]);
+  return delayed;
+}
+
+/** A vertical collapse that, unlike MUI's own Collapse (which always
+ *  reveals/hides from the top, growing or shrinking its bottom edge),
+ *  reveals/hides from the BOTTOM — its top edge is what moves. Used for the
+ *  Interpreted Concepts banner so it folds downward when a committed search
+ *  is left and unfolds upward from the bottom when one is re-committed,
+ *  mirroring the results list's own (default, top-anchored) fold in the
+ *  opposite direction — see the two Collapses in PublicationSearchPage.
+ *  Height is measured (ResizeObserver, same pattern as
+ *  ExpandablePublicationPreview above) rather than assumed, since the
+ *  banner's natural height varies with how many concepts/synonyms it's
+ *  showing. The outer Box clips to an animating `height`; the inner Box
+ *  keeps its own natural height fixed and instead animates `marginTop`
+ *  from 0 to `-naturalHeight` in lockstep, so the content's bottom edge
+ *  (marginTop + naturalHeight) stays put — at `height` — throughout, while
+ *  its top edge is what appears to travel. */
+function BottomAnchoredCollapse({ in: open, timeout = 500, children }: { in: boolean; timeout?: number; children: ReactNode }) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [naturalHeight, setNaturalHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    setNaturalHeight(el.getBoundingClientRect().height);
+    const observer = new ResizeObserver(([entry]) => setNaturalHeight(entry.contentRect.height));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <Typography sx={{
-      fontSize: 10, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase',
-      color: 'text.disabled', bgcolor: (t) => alpha(t.palette.text.disabled, 0.12),
-      borderRadius: '4px', px: 0.75, py: 0.125, flexShrink: 0,
-    }}>
-      Removed
-    </Typography>
+    <Box sx={{ height: open ? naturalHeight : 0, overflow: 'hidden', transition: `height ${timeout}ms ease` }}>
+      <Box ref={contentRef} sx={{ marginTop: open ? 0 : -naturalHeight, transition: `margin-top ${timeout}ms ease` }}>
+        {children}
+      </Box>
+    </Box>
   );
 }
 
-/** "View query details" expanded-state row for one concept — no internal
- *  IDs or boolean/technical search-term detail anymore, just the concept's
- *  name and (for concepts with one) its available synonyms; visually
- *  secondary (small, muted) to the human-readable pills above, and only
- *  shown once the user opts in. Category isn't repeated per row here — the
- *  group heading above it (see InterpretedConceptsBanner) already says so.
- *  Synonym-derived concepts (promoted via SynonymOption below) don't get
- *  their own row here — see InterpretedConceptsBanner's filter. A removed
- *  concept shows a muted, struck-through name and a "Removed" badge
- *  instead of its synonyms — adding a synonym to something no longer in
- *  the active search wouldn't make sense. The label is truncated with a
- *  Tooltip reveal, same as the chips above, since this row has no fixed
- *  width limit of its own but a Custom-added value could still be
- *  arbitrarily long. */
-function ConceptDetailRow({
-  label,
-  removed,
-  addedSynonyms,
-  onAddSynonym,
+/** Capitalises a lowercase ingredient name ("sacubitril" -> "Sacubitril")
+ *  for display — CombinationDrug.ingredients are stored lowercase since
+ *  that's what ingredientsInProximity matches against. */
+function capitalise(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** Narrow-vs-broad search-scope toggle — only ever rendered when the
+ *  committed query names a known combination drug (see CombinationDrug/
+ *  findCombinationDrug), right in the banner header area, so it's
+ *  visible regardless of whether the banner is expanded. Two plain
+ *  segments rather than a MUI ToggleButtonGroup, matching this file's
+ *  existing hand-built control style (PlainDropdown, the collapse
+ *  toggle, ...); a supporting caption line underneath (rather than only
+ *  a tooltip) states in plain language what the *currently selected*
+ *  option actually does, since a two-word label ("Narrow"/"Broad") alone
+ *  doesn't explain the mechanism — the info icon's tooltip repeats the
+ *  same explanation for both options at once, for anyone hovering before
+ *  choosing either. */
+function CombinationScopeControl({
+  drug,
+  scope,
+  onChange,
 }: {
-  label: string;
-  removed: boolean;
-  addedSynonyms: string[];
-  onAddSynonym: (synonym: string) => void;
+  drug: CombinationDrug;
+  scope: 'narrow' | 'broad';
+  onChange: (scope: 'narrow' | 'broad') => void;
 }) {
-  const availableSynonyms = removed ? [] : (CONCEPT_SYNONYMS[label] ?? []).filter((s) => !addedSynonyms.includes(s));
+  const ingredientList = drug.ingredients.map(capitalise).join(' and ');
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
-        <Tooltip title={label} enterDelay={400} slotProps={tooltipSlotProps}>
-          <Typography sx={{
-            fontSize: 15, fontWeight: 700, letterSpacing: '-0.01em', lineHeight: 1.3,
-            color: removed ? 'text.disabled' : 'text.primary',
-            textDecoration: removed ? 'line-through' : 'none',
-            maxWidth: 480, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>
-            {label}
-          </Typography>
-        </Tooltip>
-        {removed ? <RemovedBadge /> : null}
-      </Box>
-      {availableSynonyms.length > 0 ? (
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, mt: 0.25 }}>
-          <Typography sx={{ fontSize: 12, color: 'text.disabled', letterSpacing: '-0.01em' }}>
-            Synonyms — click to add to the query:
-          </Typography>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
-            {availableSynonyms.map((s) => (
-              <SynonymOption key={s} label={s} onClick={() => onAddSynonym(s)} />
-            ))}
-          </Box>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+        <Typography sx={{ fontSize: 12, fontWeight: 600, color: 'text.secondary', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
+          Search scope:
+        </Typography>
+        <Box sx={{ display: 'flex', border: '1px solid', borderColor: 'divider', borderRadius: '8px', overflow: 'hidden', bgcolor: '#fff' }}>
+          {(['narrow', 'broad'] as const).map((option) => (
+            <Box
+              key={option}
+              role="button"
+              aria-pressed={scope === option}
+              onClick={() => onChange(option)}
+              sx={{
+                px: 1.5, py: 0.5, cursor: 'pointer', fontSize: 12, fontWeight: 600, letterSpacing: '-0.01em',
+                textTransform: 'capitalize', whiteSpace: 'nowrap',
+                bgcolor: scope === option ? 'primary.main' : 'transparent',
+                color: scope === option ? '#fff' : 'text.secondary',
+                '&:hover': scope === option ? {} : { bgcolor: (t) => alpha(t.palette.primary.main, 0.08) },
+              }}
+            >
+              {option}
+            </Box>
+          ))}
         </Box>
-      ) : null}
+        <Tooltip
+          title={`Narrow searches for "${drug.tradeName}" specifically. Broad also looks for publications that discuss ${ingredientList} together, even if "${drug.tradeName}" isn't named.`}
+          placement="top"
+          arrow
+          slotProps={tooltipSlotProps}
+        >
+          <Box component="span" sx={{ display: 'inline-flex', cursor: 'help', color: 'text.disabled' }}>
+            <Info size={14} />
+          </Box>
+        </Tooltip>
+      </Box>
+      <Typography sx={{ fontSize: 12, color: 'text.secondary', letterSpacing: '-0.01em' }}>
+        {scope === 'narrow'
+          ? `Matching publications that mention "${drug.tradeName}" directly.`
+          : `Also matching publications that discuss ${ingredientList} together, even without "${drug.tradeName}" named.`}
+      </Typography>
     </Box>
   );
 }
@@ -2322,15 +2652,16 @@ function ConceptDetailRow({
 /** Sits directly above the publication list once a search is committed —
  *  same tinted-info visual language as BooleanInfoBar (primary at 6%
  *  opacity, rounded, no border), just reporting the mock-interpreted
- *  concepts grouped by category instead of carrying static copy. Read-only:
- *  these aren't editable search filters, just Compass's own summary of
- *  what it understood from the query (which stays visible, unchanged,
- *  in the search bar itself).
+ *  concepts grouped by category instead of carrying static copy.
  *
- *  "Unfold query" (collapsed by default) reveals the underlying synonyms/
- *  search-terms/OCIDs behind each concept — technical detail kept hidden
- *  until the user explicitly asks to verify the interpretation, per "hide
- *  raw synonyms and OCIDs by default." */
+ *  Collapsed (the default), this is a simple, scannable summary — every
+ *  active concept as a plain chip, no category boxes, no remove
+ *  controls, no add-a-concept search — so the banner never reads as a
+ *  query builder at a glance. "Edit concepts" expands it in place (see
+ *  `expanded` below): the same concepts reorganise into ConceptDetails'
+ *  categorised, editable containers directly beneath, still inside this
+ *  same Box, never a separate dropdown/popover. "Collapse" drops
+ *  straight back to the plain chip summary. */
 function InterpretedConceptsBanner({
   query,
   concepts,
@@ -2340,7 +2671,9 @@ function InterpretedConceptsBanner({
   canUndo,
   onUndo,
   onAddCustomConcept,
-  onClearAllCustom,
+  combinationDrug,
+  combinationScope,
+  onCombinationScopeChange,
 }: {
   query: string;
   concepts: DisplayConcept[];
@@ -2350,37 +2683,20 @@ function InterpretedConceptsBanner({
   canUndo: boolean;
   onUndo: () => void;
   onAddCustomConcept: (option: CatalogConcept) => void;
-  onClearAllCustom: () => void;
+  /** Set only when the query names a known combination drug (see
+   *  CombinationDrug/findCombinationDrug) — the narrow/broad control
+   *  below only ever renders when this is non-null. */
+  combinationDrug: CombinationDrug | null;
+  combinationScope: 'narrow' | 'broad';
+  onCombinationScopeChange: (scope: 'narrow' | 'broad') => void;
 }) {
-  const [unfolded, setUnfolded] = useState(false);
-  // Which category's "Show N more" flyout is open, if any — purely a local
-  // display concern (unlike removal, which must persist in page state so
-  // computeConceptState sees it on every recompute).
-  const [moreFlyoutCategory, setMoreFlyoutCategory] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
   // `concepts` (the prop) is the *full* history — active and removed alike
-  // (see DisplayConcept.removed) — so the active category boxes below
-  // filter down to just the active ones, while Query details further down
-  // uses the unfiltered prop directly, so a removed concept keeps showing
-  // there instead of disappearing.
+  // (see DisplayConcept.removed) — both the collapsed summary and the
+  // expanded categories below only ever show the active ones; a removed
+  // concept simply disappears (Undo, in the header, is how it comes back).
   const activeConcepts = useMemo(() => concepts.filter((c) => !c.removed), [concepts]);
   const groups = useMemo(() => groupConceptsByCategory(activeConcepts), [activeConcepts]);
-  // Custom gets its own dedicated, always-rendered box below (see JSX) so
-  // its "add a concept" search is a stable, visible entry point even
-  // before anything's been added — unlike the other categories, which only
-  // appear once the query actually produced a concept for them.
-  const interpretedGroups = groups.filter((g) => g.category !== 'Custom');
-  const flyoutGroup = groups.find((g) => g.category === moreFlyoutCategory) ?? null;
-  const customConcepts = activeConcepts.filter((c) => c.category === 'Custom');
-  // Query details shows one row per *originally matched/derived* concept,
-  // active or removed — a synonym promoted from that row into its own chip
-  // (see SynonymOption) doesn't get a second, redundant row of its own.
-  // Grouped by category (same grouping as the active boxes above) so a
-  // removed concept still shows up under its original category heading
-  // rather than in some undifferentiated flat list.
-  const detailGroups = useMemo(
-    () => groupConceptsByCategory(concepts.filter((c) => parseSynonymConceptKey(c.key) === null)),
-    [concepts],
-  );
 
   return (
     <Box sx={{
@@ -2389,16 +2705,25 @@ function InterpretedConceptsBanner({
       // (radius, border-less, typography) is unchanged.
       bgcolor: (t) => alpha(t.palette.primary.main, 0.06),
       borderRadius: '10px',
-      px: 2.5,
-      py: 2,
+      // Balanced (equal horizontal/vertical) padding, up from the previous
+      // px:2.5/py:2 mismatch, for more even breathing room around the
+      // content — visual style, hierarchy and position otherwise
+      // unchanged.
+      px: 3,
+      py: 3,
       display: 'flex',
       flexDirection: 'column',
       gap: 1.25,
-      // Sits directly after the reserved slim-bar spacer (see the page
-      // component); this pulls it 30% closer to that spacer than the
-      // column's own shared `gap` (32px) would otherwise leave it, without
-      // touching that gap (which also spaces unrelated siblings below).
-      mt: '-9.6px',
+      // The closer-to-the-spacer-above adjustment this used to carry
+      // (mt: '-9.6px') now lives one level up, on the plain Box wrapping
+      // this component's BottomAnchoredCollapse in the page component —
+      // not here. BottomAnchoredCollapse's own root clips to a measured
+      // height via `overflow: hidden`; a negative margin on *this* Box
+      // (the thing actually measured) shifts it upward past that
+      // measured height, so the clip cuts straight through the top-left/
+      // top-right corner radius. Applying the same shift outside the
+      // clipped element instead moves the whole already-sized banner as
+      // a rigid unit, with nothing left inside to clip.
     }}>
       <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 2 }}>
         <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 0.5, flexWrap: 'wrap' }}>
@@ -2410,134 +2735,77 @@ function InterpretedConceptsBanner({
           </Typography>
         </Box>
 
-        {/* `concepts.length` (the full history, active and removed alike)
-            covers the fold toggle: even once every concept is removed,
-            there's still something worth viewing in Query details. `canUndo`
-            covers Undo separately, for the one case that history can't:
-            before a search is even committed, when there's no history yet. */}
-        {canUndo || concepts.length > 0 ? (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.75, flexShrink: 0 }}>
-            {/* Steps back through the user's concept/synonym edits one at a
-                time (see the page component's undoStack) — hidden entirely
-                rather than shown disabled once there's nothing left to
-                revert, per "hide Undo when there are no changes." Muted
-                text.disabled (rather than the toggle's primary.main) keeps
-                it visually secondary to the query content, only darkening
-                on hover to confirm it's interactive. */}
-            {canUndo ? (
-              <Box
-                role="button"
-                aria-label="Undo last query change"
-                onClick={onUndo}
-                sx={{
-                  fontSize: 12, fontWeight: 600, letterSpacing: '-0.01em', whiteSpace: 'nowrap',
-                  color: 'text.disabled', cursor: 'pointer',
-                  '&:hover': { color: 'text.secondary' },
-                }}
-              >
-                Undo
-              </Box>
-            ) : null}
-            {concepts.length > 0 ? (
-              <Box
-                role="button"
-                onClick={() => setUnfolded((v) => !v)}
-                sx={{
-                  display: 'flex', alignItems: 'center', gap: 0.5,
-                  cursor: 'pointer',
-                  // primary.main (not text.secondary) — text.secondary's ~3.8:1
-                  // contrast against this tinted background falls short of the
-                  // 4.5:1 AA minimum for text this size; primary.main clears
-                  // ~4.9:1 while staying within the banner's existing palette
-                  // (already used for the concept pills below). Hover darkens
-                  // to the same shade already used for button hovers elsewhere
-                  // in this file, rather than introducing a new colour.
-                  color: 'primary.main',
-                  '&:hover': { color: '#3d4891' },
-                }}
-              >
-                <Typography sx={{ fontSize: 12, fontWeight: 600, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
-                  {unfolded ? 'Hide query details' : 'View query details'}
-                </Typography>
-                {unfolded ? <CaretUp size={12} /> : <CaretDown size={12} />}
-              </Box>
-            ) : null}
-          </Box>
-        ) : null}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.75, flexShrink: 0 }}>
+          {/* Steps back through the user's concept/synonym edits one at a
+              time (see the page component's undoStack) — hidden entirely
+              rather than shown disabled once there's nothing left to
+              revert, per "hide Undo when there are no changes." */}
+          {canUndo ? (
+            <Box
+              role="button"
+              aria-label="Undo last query change"
+              onClick={onUndo}
+              sx={{
+                fontSize: 12, fontWeight: 600, letterSpacing: '-0.01em', whiteSpace: 'nowrap',
+                color: 'text.disabled', cursor: 'pointer',
+                '&:hover': { color: 'text.secondary' },
+              }}
+            >
+              Undo
+            </Box>
+          ) : null}
+          {/* Plain text link, no icon — the only entry point into
+              query-building; the collapsed summary below is otherwise
+              entirely display-only. */}
+          {groups.length > 0 ? (
+            <Box
+              role="button"
+              onClick={() => setExpanded((v) => !v)}
+              sx={{
+                fontSize: 12, fontWeight: 600, letterSpacing: '-0.01em', whiteSpace: 'nowrap',
+                color: 'primary.main', cursor: 'pointer',
+                '&:hover': { color: '#3d4891' },
+              }}
+            >
+              {expanded ? 'Collapse' : 'Edit concepts'}
+            </Box>
+          ) : null}
+        </Box>
       </Box>
 
-      {interpretedGroups.length === 0 ? (
+      {/* Only ever rendered once the query names a known combination
+          drug (see CombinationDrug/findCombinationDrug) — for every
+          other, single-ingredient drug, nothing here changes at all. */}
+      {combinationDrug ? (
+        <CombinationScopeControl
+          drug={combinationDrug}
+          scope={combinationScope}
+          onChange={onCombinationScopeChange}
+        />
+      ) : null}
+
+      {groups.length === 0 ? (
         <Typography sx={{ fontSize: 13, color: 'text.secondary', letterSpacing: '-0.01em' }}>
           No specific concepts recognised — showing broad results for this query.
         </Typography>
-      ) : null}
-
-      {/* Wraps to as many lines as needed for the common case; capped and
-          scrollable only as a safety net against a pathologically large
-          number of recognised categories, so the banner itself never grows
-          unbounded. Custom is always rendered here too — even with nothing
-          added yet — so its search stays a visible, stable entry point
-          rather than something that only appears after a first add. */}
-      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 1.25, maxHeight: 220, overflowY: 'auto' }}>
-        {interpretedGroups.map((g) => (
-          <CategoryBox
-            key={g.category}
-            category={g.category}
-            concepts={g.concepts}
-            onRemove={onRemoveConcept}
-            onShowMore={() => setMoreFlyoutCategory(g.category)}
-          />
-        ))}
-        <CategoryBox
-          category="Custom"
-          concepts={customConcepts}
+      ) : expanded ? (
+        <ConceptDetails
+          groups={groups}
+          activeConcepts={activeConcepts}
+          onAdd={onAddCustomConcept}
           onRemove={onRemoveConcept}
-          onShowMore={() => setMoreFlyoutCategory('Custom')}
-          footer={<CustomConceptSearch concepts={activeConcepts} onAdd={onAddCustomConcept} />}
+          addedSynonyms={addedSynonyms}
+          onAddSynonym={onAddSynonym}
         />
-      </Box>
-
-      {unfolded ? (
-        <Box sx={{
-          display: 'flex', flexDirection: 'column', gap: 1.5,
-          pt: 1.25, mt: 0.25, borderTop: '1px solid',
-          borderColor: (t) => alpha(t.palette.primary.main, 0.15),
-        }}>
-          {detailGroups.map((g) => (
-            <Box key={g.category} sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-              {/* Same uppercase small-caption style as each CategoryBox's
-                  own header above, so Query details reads as the same
-                  category structure just in more detail, not a separate
-                  system. */}
-              <Typography sx={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'text.disabled' }}>
-                {g.category}
-              </Typography>
-              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-                {g.concepts.map((c) => (
-                  <ConceptDetailRow
-                    key={c.key}
-                    label={c.label}
-                    removed={c.removed}
-                    addedSynonyms={addedSynonyms[c.key] ?? []}
-                    onAddSynonym={(synonym) => onAddSynonym(c.key, synonym)}
-                  />
-                ))}
-              </Box>
-            </Box>
-          ))}
+      ) : (
+        // Collapsed: every active concept, flat — no category grouping,
+        // no chip-level controls. maxHeight/overflow is a safety net
+        // against a pathologically large number of concepts, not
+        // something expected to kick in normally.
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, maxHeight: 220, overflowY: 'auto' }}>
+          {activeConcepts.map((c) => <ConceptSummaryChip key={c.key} label={c.label} />)}
         </Box>
-      ) : null}
-
-      <CategoryMoreFlyout
-        open={moreFlyoutCategory !== null}
-        category={moreFlyoutCategory}
-        concepts={flyoutGroup?.concepts ?? []}
-        onRemove={onRemoveConcept}
-        onClose={() => setMoreFlyoutCategory(null)}
-        activeConcepts={activeConcepts}
-        onAddCustomConcept={onAddCustomConcept}
-        onClearAllCustom={onClearAllCustom}
-      />
+      )}
     </Box>
   );
 }
@@ -2708,6 +2976,13 @@ export default function PublicationSearchPage() {
   // UndoStep. Same lifecycle as removedConceptKeys/addedSynonyms above:
   // scoped to one committed search, reset on the next.
   const [undoStack, setUndoStack] = useState<UndoStep[]>([]);
+  // "Narrow" (trade name only) vs "broad" (also match on ingredient
+  // proximity) — only meaningful, and only shown, once conceptState.
+  // combinationDrug is set (see CombinationScopeControl). Same lifecycle
+  // as the rest of this group: scoped to one committed search, reset on
+  // the next, so a stale "broad" choice never silently carries over onto
+  // an unrelated later query.
+  const [combinationScope, setCombinationScope] = useState<'narrow' | 'broad'>('narrow');
   // Brief, unobtrusive "results are updating" overlay shown on the
   // publication list while a concept/synonym edit's search re-runs — purely
   // cosmetic (the underlying filtering below is already synchronous), just
@@ -2746,6 +3021,7 @@ export default function PublicationSearchPage() {
     setAddedSynonyms({});
     setCustomConcepts([]);
     setUndoStack([]);
+    setCombinationScope('narrow');
     setPage(1);
     setPhase('loading');
     if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
@@ -2844,18 +3120,6 @@ export default function PublicationSearchPage() {
     triggerBriefRefresh();
   };
 
-  /** Fires from the Custom flyout's "Clear all" (see CategoryMoreFlyout) —
-   *  removes every currently-active custom concept in one go by running
-   *  each through the exact same path as its own individual × would
-   *  (handleRemoveConcept), so Undo still steps back through them one at
-   *  a time afterward rather than needing a separate bulk-undo case. */
-  const handleClearAllCustomConcepts = () => {
-    const activeCustomKeys = conceptState.allConcepts
-      .filter((c) => c.category === 'Custom' && !c.removed)
-      .map((c) => c.key);
-    activeCustomKeys.forEach((key) => handleRemoveConcept(key));
-  };
-
   /** Table column headers toggle direction on repeat clicks (pass no `dir`);
    *  the toolbar's "Publication date" menu sets year + an explicit direction. */
   const applySort = (key: SortKey, dir?: SortDir) => {
@@ -2910,8 +3174,14 @@ export default function PublicationSearchPage() {
       orTerms: conceptState.matchOrTerms,
       requiredPhrase: conceptState.filterQualifier ?? undefined,
       predicates: conceptState.matchPredicates,
+      // Only wired up once there's actually a combination drug to search
+      // broadly for *and* the user has switched to that scope — narrow
+      // (the default) relies purely on orTerms, same as any other drug.
+      orPredicate: combinationScope === 'broad' && conceptState.combinationDrug
+        ? (p) => ingredientsInProximity(p, conceptState.combinationDrug!.ingredients)
+        : undefined,
     }),
-    [committedQuery, publicationFilter, conceptState.matchOrTerms, conceptState.filterQualifier, conceptState.matchPredicates],
+    [committedQuery, publicationFilter, conceptState.matchOrTerms, conceptState.filterQualifier, conceptState.matchPredicates, conceptState.combinationDrug, combinationScope],
   );
 
   const resultsSorted = useMemo(() => {
@@ -2970,6 +3240,23 @@ export default function PublicationSearchPage() {
   // no scrolling.
   const showSlimLayout = expanded || isCommittedSearch;
 
+  // Fade-in for each half is delayed until its own fold-open Collapse is
+  // nearly done (350ms into the 500ms animation); fade-out is immediate,
+  // concurrent with fold-closed — see useDelayedTrue. Both the concepts
+  // banner (BottomAnchoredCollapse) and the results Collapse below are
+  // always rendered (never gated by an outer isCommittedSearch/expanded
+  // conditional) — MUI's Collapse only plays its "enter" animation on a
+  // genuine in:false→true prop change on an already-mounted instance; a
+  // component that *mounts* already at in:true just renders pre-opened,
+  // no animation, since Transition's `appear` isn't enabled by default.
+  // Gating the Collapse itself behind a ternary (an earlier version of
+  // this did exactly that, via a "just closed, linger one more cycle"
+  // flag) recreates that exact fresh-mount case on every reopen.
+  // `unmountOnExit` still reclaims each side's DOM once fully closed,
+  // without the outer element ever actually unmounting.
+  const bannerVisible = useDelayedTrue(isCommittedSearch, 350);
+  const resultsVisible = useDelayedTrue(isCommittedSearch, 350);
+
   return (
     <Box
       component="main"
@@ -2985,20 +3272,23 @@ export default function PublicationSearchPage() {
         overflowY: showSlimLayout ? 'auto' : 'hidden',
       }}
     >
-      <Fade in={showSlimLayout} timeout={500} unmountOnExit>
-        <div>
-          <SlimSearchBar
-            onBack={handleBackToSearch}
-            publicationFilter={publicationFilter}
-            onPublicationFilterChange={setPublicationFilter}
-            sortKey={sortKey}
-            sortDir={sortDir}
-            onSort={applySort}
-          />
-        </div>
-      </Fade>
+      {/* Always rendered, unconditionally — never faded out or unmounted,
+          regardless of showSlimLayout/expanded/committed-search state, so
+          it stays visible through every transition. SlimSearchBar's own
+          styling/positioning is untouched; only the wrapping Fade/
+          unmountOnExit gate that used to hide it has been removed. */}
+      <SlimSearchBar
+        onBack={handleBackToSearch}
+        showFilters={showSlimLayout}
+        publicationFilter={publicationFilter}
+        onPublicationFilterChange={setPublicationFilter}
+        sortKey={sortKey}
+        sortDir={sortDir}
+        onSort={applySort}
+      />
 
       <Box sx={{
+        position: 'relative',
         px: 6,
         // Vertical space at the top of the page.
         pt: '32px',
@@ -3020,64 +3310,121 @@ export default function PublicationSearchPage() {
         {/* Interpreted concepts sits between the slim bar and the results,
             full-width within this same 1440 content column — only for a
             committed search, never for the plain "browse full list" expand
-            (which has no query to interpret). */}
-        {isCommittedSearch ? (
-          <InterpretedConceptsBanner
-            query={committedQuery}
-            concepts={conceptState.allConcepts}
-            onRemoveConcept={handleRemoveConcept}
-            addedSynonyms={addedSynonyms}
-            onAddSynonym={handleAddSynonym}
-            canUndo={undoStack.length > 0}
-            onUndo={handleUndo}
-            onAddCustomConcept={handleAddCustomConcept}
-            onClearAllCustom={handleClearAllCustomConcepts}
-          />
-        ) : null}
+            (which has no query to interpret). Always rendered (in={} is
+            what governs visibility, not a wrapping conditional) so this
+            stays the same persistent Collapse instance across every
+            open/close cycle — see the comment above bannerVisible/
+            resultsVisible for why that matters. committedQuery/
+            conceptState are only reset by the *next*
+            handleFindPublications, so the banner keeps showing its last
+            real content while folding away rather than going blank first.
+            Folds downward (closes) / unfolds upward from the bottom
+            (reopens) — see BottomAnchoredCollapse — the mirror image of
+            the results list's own fold below, so the two meet in the
+            middle. */}
+        {/* mt here (not on the banner itself, one level down) pulls the
+            whole collapse 30% closer to the spacer above than the column's
+            own shared `gap` (32px) would otherwise leave it, without
+            touching that gap (which also spaces unrelated siblings below).
+            Deliberately outside BottomAnchoredCollapse: its root clips to a
+            measured height via `overflow: hidden`, so a negative margin on
+            the *measured* content shifts it upward past its own clip,
+            slicing off the banner's top-left/top-right corner radius.
+            Shifting this outer, unclipped Box instead moves the whole
+            already-sized collapse as one rigid unit. */}
+        <Box sx={{ mt: '-9.6px' }}>
+          <BottomAnchoredCollapse in={isCommittedSearch} timeout={500}>
+            <Box sx={{
+              opacity: bannerVisible ? 1 : 0,
+              transition: 'opacity 400ms ease',
+            }}>
+              <InterpretedConceptsBanner
+                query={committedQuery}
+                concepts={conceptState.allConcepts}
+                onRemoveConcept={handleRemoveConcept}
+                addedSynonyms={addedSynonyms}
+                onAddSynonym={handleAddSynonym}
+                canUndo={undoStack.length > 0}
+                onUndo={handleUndo}
+                onAddCustomConcept={handleAddCustomConcept}
+                combinationDrug={conceptState.combinationDrug}
+                combinationScope={combinationScope}
+                onCombinationScopeChange={setCombinationScope}
+              />
+            </Box>
+          </BottomAnchoredCollapse>
+        </Box>
 
-        {/* Once the slim bar is showing, the org badge simply isn't rendered
-            rather than being its own Collapse — one less flex item means one
-            less reserved gap left behind above the results once this and the
-            header/capsule block below are both gone. */}
-        {showSlimLayout ? null : <OrgBadge />}
+        {/* Absolutely positioned (see OrgBadge) — fades out in place rather
+            than being conditionally unmounted, so nothing below it in this
+            flex column has to shift when the slim layout takes over. */}
+        <OrgBadge visible={!showSlimLayout} />
 
-        {/* The header/search-area content collapses away into the sticky slim
-            bar above once shown. unmountOnExit intentionally omitted — the
-            search input inside must stay mounted throughout so it can dock
-            via its own `docked` prop instead of ever being removed; see
-            SearchCapsule. This keeps working the same way for a committed
-            search as for the "browse full list" expand, since both now
-            drive the same `showSlimLayout` flag.
+        {/* The header/search-area content fades out and collapses away into
+            the sticky slim bar above once shown. unmountOnExit intentionally
+            omitted — the search input inside must stay mounted throughout so
+            it can dock via its own `docked` prop instead of ever being
+            removed; see SearchCapsule. This keeps working the same way for a
+            committed search as for the "browse full list" expand, since both
+            now drive the same `showSlimLayout` flag.
             mt pushes the search area down for a more centred vertical
             balance against the (now shorter) preview below. Since the
             preview is the flex:1 item that fills whatever's left down to
             the bottom of the viewport, this fixed amount comes straight out
             of its height — the preview shrinks by exactly this much, its
-            bottom edge/button position are otherwise untouched. Applied as
-            margin on Collapse directly (rather than a separate spacer flex
-            item) so it doesn't pick up an extra `gap` on top of itself. */}
-        <Collapse in={!showSlimLayout} timeout={500} sx={{ mt: showSlimLayout ? 0 : '50px' }}>
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, textAlign: 'center', maxWidth: 900, mx: 'auto' }}>
-              <Typography sx={{ fontSize: 28, fontWeight: 700, color: 'text.primary', letterSpacing: '-0.01em', lineHeight: 1.25 }}>
-                Find publications to start your workspace
-              </Typography>
-              <Typography sx={{ fontSize: 15, fontWeight: 400, color: 'text.secondary', letterSpacing: '-0.01em' }}>
-                Describe the treatment, disease or research topic you're exploring. Compass identifies relevant scientific concepts and publications for you.
-              </Typography>
-            </Box>
+            bottom edge/button position are otherwise untouched.
+            The margin lives on this wrapping Box rather than on Collapse
+            itself (or as a separate spacer flex item, which would pick up
+            an extra `gap` on top of itself): Collapse drives its own
+            `transition` inline while animating, which would silently win
+            over — and so completely swallow — any transition declared via
+            `sx` on that same element, leaving the margin to snap instantly
+            instead of animating alongside it. */}
+        <Box sx={{ mt: showSlimLayout ? 0 : '50px', transition: 'margin-top 0.5s ease' }}>
+          <Collapse in={!showSlimLayout} timeout={500}>
+            {/* Fades out over the same 500ms as the Collapse's own height
+                animation (rather than being left to the height animation
+                alone to imply), so the heading and search card visibly fade
+                away in place instead of just shrinking.
+                This opacity is applied individually to each piece below
+                (the heading block, the "Find publications" button, the
+                helper text, BooleanInfoBar) rather than once on a shared
+                wrapper around all of them — SearchCapsule lives in here too
+                (see SearchLandingCard) and, once docked, escapes via its
+                own `position: fixed` to stay visible/anchored in the slim
+                bar; opacity is a compositing property that still applies to
+                position:fixed descendants despite them escaping normal
+                layout, so a shared opacity:0 wrapper here would silently
+                force the docked capsule invisible too. Individual opacity
+                on everything *except* SearchCapsule avoids that. */}
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <Box sx={{
+                display: 'flex', flexDirection: 'column', gap: 1, textAlign: 'center', maxWidth: 900, mx: 'auto',
+                opacity: showSlimLayout ? 0 : 1,
+                transition: 'opacity 0.5s ease',
+              }}>
+                <Typography sx={{ fontSize: 28, fontWeight: 700, color: 'text.primary', letterSpacing: '-0.01em', lineHeight: 1.25 }}>
+                  Find publications to start your workspace
+                </Typography>
+                <Typography sx={{ fontSize: 15, fontWeight: 400, color: 'text.secondary', letterSpacing: '-0.01em' }}>
+                  Describe the treatment, disease or research topic you're exploring. Compass identifies relevant scientific concepts and publications for you.
+                </Typography>
+              </Box>
 
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, maxWidth: 1080, width: '100%', mx: 'auto' }}>
-              <SearchLandingCard
-                query={query}
-                onQueryChange={setQuery}
-                onSubmit={handleFindPublications}
-                docked={showSlimLayout}
-              />
-              <BooleanInfoBar />
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, maxWidth: 1080, width: '100%', mx: 'auto' }}>
+                <SearchLandingCard
+                  query={query}
+                  onQueryChange={setQuery}
+                  onSubmit={handleFindPublications}
+                  docked={showSlimLayout}
+                />
+                <Box sx={{ opacity: showSlimLayout ? 0 : 1, transition: 'opacity 0.5s ease' }}>
+                  <BooleanInfoBar />
+                </Box>
+              </Box>
             </Box>
-          </Box>
-        </Collapse>
+          </Collapse>
+        </Box>
 
         {/* Shown from first load, before any search. flex: 1 so the
             preview below fills whatever's left of the viewport while on the
@@ -3096,67 +3443,89 @@ export default function PublicationSearchPage() {
             concepts banner's own gap for a committed search), without
             touching either element's own size or the gap used everywhere
             else in this column. */}
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, flex: showSlimLayout ? 'none' : 1, minHeight: 0, mt: showSlimLayout ? '-32px' : '132px' }}>
-          {isCommittedSearch ? (
-            phase === 'loading' ? (
-              <FindingPublicationsLoader />
-            ) : (
-              <>
-                {/* Sits between the concepts banner and the results — a
-                    contextual refinement step, not a gate: resultsSorted
-                    below already reflects the broad interpretation, so
-                    nothing is hidden while this is showing. */}
-                {conceptState.pendingClarification ? (
-                  <ClarificationPanel
-                    question={conceptState.pendingClarification.question}
-                    options={conceptState.pendingClarification.options}
-                    broadLabel={conceptState.pendingClarification.broadLabel}
-                    onSelectOption={(optionKey) => handleClarificationSelect(conceptState.pendingClarification!.disease, optionKey)}
-                    onSelectBroad={() => handleClarificationSelect(conceptState.pendingClarification!.disease, 'broad')}
-                  />
-                ) : null}
-
-                <ResultsToolbar resultCount={resultsSorted.length} initial={false} />
-                {/* position:relative host for the brief "Refreshing
-                    results..." overlay below — shown momentarily whenever a
-                    concept/synonym edit re-runs the search (see
-                    triggerBriefRefresh), distinct from and much shorter
-                    than FindingPublicationsLoader's initial ~2s interstitial. */}
-                <Box sx={{ position: 'relative' }}>
-                  {isRefreshingResults ? (
-                    <Box sx={{
-                      position: 'absolute', inset: 0, zIndex: 2, borderRadius: '12px',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      bgcolor: (t) => alpha(t.palette.background.paper, 0.7),
-                    }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <CircularProgress size={16} sx={{ color: 'primary.main' }} />
-                        <Typography sx={{ fontSize: 13, fontWeight: 600, color: 'text.secondary', letterSpacing: '-0.01em' }}>
-                          Refreshing results...
-                        </Typography>
-                      </Box>
-                    </Box>
-                  ) : null}
-                  {/* The table's own grid columns (unchanged) have a real
-                      combined minimum width; this scrolls horizontally
-                      rather than letting the table clip if the viewport is
-                      narrower than that. */}
-                  <Box sx={{ overflowX: 'auto' }}>
-                    <PublicationsTable
-                      publications={resultsPaginated}
-                      sortKey={sortKey}
-                      sortDir={sortDir}
-                      onSort={applySort}
-                      selectedIds={selectedIds}
-                      onToggleRow={toggleRow}
-                      onToggleAll={() => toggleAll(resultsSorted)}
-                      pagination={{ page, pageCount: resultsPageCount, onChange: setPage }}
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, flex: showSlimLayout ? 'none' : 1, minHeight: 0, mt: showSlimLayout ? '-32px' : '132px', transition: 'margin-top 0.5s ease' }}>
+          {/* Standard (top-anchored) Collapse — the mirror image of the
+              concepts banner's BottomAnchoredCollapse above: this folds
+              upward (shrinks from the bottom) on close and unfolds
+              downward from the top on reopen, so the two visibly close
+              toward — and reopen from — a shared middle. Always rendered,
+              same reasoning as the banner above: `unmountOnExit` reclaims
+              the table's DOM once fully closed without the Collapse
+              element itself ever being removed from the tree. */}
+          <Collapse in={isCommittedSearch} timeout={500} unmountOnExit>
+            <Box sx={{
+              display: 'flex', flexDirection: 'column', gap: 1.5,
+              opacity: resultsVisible ? 1 : 0,
+              transition: 'opacity 400ms ease',
+            }}>
+              {phase === 'loading' ? (
+                <FindingPublicationsLoader />
+              ) : (
+                <>
+                  {/* Sits between the concepts banner and the results — a
+                      contextual refinement step, not a gate: resultsSorted
+                      below already reflects the broad interpretation, so
+                      nothing is hidden while this is showing. */}
+                  {conceptState.pendingClarification ? (
+                    <ClarificationPanel
+                      question={conceptState.pendingClarification.question}
+                      options={conceptState.pendingClarification.options}
+                      broadLabel={conceptState.pendingClarification.broadLabel}
+                      onSelectOption={(optionKey) => handleClarificationSelect(conceptState.pendingClarification!.disease, optionKey)}
+                      onSelectBroad={() => handleClarificationSelect(conceptState.pendingClarification!.disease, 'broad')}
                     />
+                  ) : null}
+
+                  <ResultsToolbar resultCount={resultsSorted.length} initial={false} />
+                  {/* position:relative host for the brief "Refreshing
+                      results..." overlay below — shown momentarily whenever a
+                      concept/synonym edit re-runs the search (see
+                      triggerBriefRefresh), distinct from and much shorter
+                      than FindingPublicationsLoader's initial ~2s interstitial. */}
+                  <Box sx={{ position: 'relative' }}>
+                    {isRefreshingResults ? (
+                      <Box sx={{
+                        position: 'absolute', inset: 0, zIndex: 2, borderRadius: '12px',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        bgcolor: (t) => alpha(t.palette.background.paper, 0.7),
+                      }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                          <CircularProgress size={16} sx={{ color: 'primary.main' }} />
+                          <Typography sx={{ fontSize: 13, fontWeight: 600, color: 'text.secondary', letterSpacing: '-0.01em' }}>
+                            Refreshing results...
+                          </Typography>
+                        </Box>
+                      </Box>
+                    ) : null}
+                    {/* The table's own grid columns (unchanged) have a real
+                        combined minimum width; this scrolls horizontally
+                        rather than letting the table clip if the viewport is
+                        narrower than that. */}
+                    <Box sx={{ overflowX: 'auto' }}>
+                      <PublicationsTable
+                        publications={resultsPaginated}
+                        sortKey={sortKey}
+                        sortDir={sortDir}
+                        onSort={applySort}
+                        selectedIds={selectedIds}
+                        onToggleRow={toggleRow}
+                        onToggleAll={() => toggleAll(resultsSorted)}
+                        pagination={{ page, pageCount: resultsPageCount, onChange: setPage }}
+                      />
+                    </Box>
                   </Box>
-                </Box>
-              </>
-            )
-          ) : (
+                </>
+              )}
+            </Box>
+          </Collapse>
+
+          {/* Browse-full-list preview — mutually exclusive with the
+              committed-results Collapse above, but left as a plain
+              conditional (not folded/animated) since it isn't part of
+              this request: the fold/close-toward-centre treatment is
+              specifically for leaving/returning to a *committed* search,
+              not for the initial preview-to-loading handoff on submit. */}
+          {!isCommittedSearch ? (
             <>
               <ResultsToolbar
                 resultCount={sorted.length}
@@ -3177,7 +3546,7 @@ export default function PublicationSearchPage() {
                 />
               </ExpandablePublicationPreview>
             </>
-          )}
+          ) : null}
         </Box>
       </Box>
     </Box>

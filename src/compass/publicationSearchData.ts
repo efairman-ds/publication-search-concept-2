@@ -24,6 +24,16 @@ export interface SearchPublication {
   citations: number;
   /** Undefined ≈ 'Research article' for all pre-existing rows. */
   articleType?: 'Research article' | 'Review' | 'Guideline' | 'Methods';
+  /** Undefined for every pre-existing row (the title alone was always
+   *  enough for this dataset's own matching). Only present on rows added
+   *  specifically to test combination-drug "broad" search — see
+   *  ingredientsInProximity in PublicationSearchPage.tsx, which checks
+   *  title + abstract together for two active ingredients mentioned near
+   *  each other, a check a short title alone usually can't exercise on
+   *  its own (either both ingredients fit closely in one short sentence
+   *  by default, or there's no room to place them meaningfully far
+   *  apart). */
+  abstract?: string;
 }
 
 function org(name: string, category: OrgCategory = 'organisation'): SearchOrganisation {
@@ -4665,5 +4675,108 @@ export const PUBLICATIONS: SearchPublication[] = [
     doi: '10.1001/jamaoto.2026.5018',
     organisations: [org('University of Melbourne')],
     altmetric: 31, citations: 4,
+  },
+
+  // ── DOI search examples ─────────────────────────────────────────────────
+  // Real-looking DOIs (not the templated 10.xxxx/yyyy.NNNN style used
+  // above) so a query entered as a full DOI URL, a bare doi.org path, a
+  // "DOI:"-prefixed identifier, or a plain DOI all resolve to an actual
+  // row here — see extractDocumentIdentifierMatches.
+  {
+    id: 'p509', area: 'Oncology',
+    title: 'Real-world outcomes of immune checkpoint inhibitors in advanced hepatocellular carcinoma',
+    journal: 'Cancers', year: 2023,
+    authors: 'K. Yamazaki, R. Osei +4',
+    doi: '10.3390/cancers15174330',
+    organisations: [org('Kyoto University')],
+    altmetric: 48, citations: 12,
+  },
+  {
+    id: 'p510', area: 'Healthcare research',
+    title: 'A case of drug-induced liver injury following long-term methotrexate therapy',
+    journal: 'Internal Medicine', year: 2019,
+    authors: 'S. Nakamura, T. Fujimoto +2',
+    doi: '10.2169/internalmedicine.1011-18',
+    organisations: [org('Osaka University')],
+    altmetric: 9, citations: 6,
+  },
+  {
+    id: 'p511', area: 'Healthcare research',
+    title: 'Atypical presentation of subacute thyroiditis mimicking metastatic malignancy: a case report',
+    journal: 'Cureus', year: 2022,
+    authors: 'A. Okafor, M. Delacroix +1',
+    doi: '10.7759/cureus.26359',
+    organisations: [org('Memorial Sloan Kettering Cancer Center')],
+    altmetric: 14, citations: 3,
+  },
+
+  // ── Population-descriptor search examples ──────────────────────────────
+  // "Provide me the relevant papers about nivolumab treatment of melanoma
+  // in women" and similar — see extractPopulationMatches.
+  {
+    id: 'p512', area: 'Oncology',
+    title: 'Nivolumab treatment outcomes for melanoma in women: a sex-stratified analysis',
+    journal: 'Journal of Clinical Oncology', year: 2023,
+    authors: 'P. Adeyemi, R. Costa +3',
+    doi: '10.1200/JCO.23.00512',
+    organisations: [org('MD Anderson Cancer Center')],
+    altmetric: 63, citations: 21,
+  },
+  {
+    id: 'p513', area: 'Oncology',
+    title: 'Immune-related adverse events with nivolumab in elderly patients with advanced melanoma',
+    journal: 'Journal of Geriatric Oncology', year: 2022,
+    authors: 'K. Lindgren, S. Achebe +2',
+    doi: '10.1016/j.jgo.2022.5013',
+    organisations: [org('Memorial Sloan Kettering Cancer Center')],
+    altmetric: 29, citations: 14,
+  },
+
+  // ── Combination drug ("broad" search scope) examples ─────────────────────
+  // Entresto (sacubitril/valsartan) — see COMBINATION_DRUGS and
+  // ingredientsInProximity. p514 names the trade name directly (a
+  // "narrow" scope hit); p515 discusses both active ingredients together
+  // without ever naming Entresto (a "broad"-only hit); p516 names only
+  // one of the two ingredients (must NOT satisfy broad matching); p517
+  // names both, but far enough apart in the abstract that they aren't
+  // meaningfully discussed together (the proximity check must still
+  // reject it).
+  {
+    id: 'p514', area: 'Cardiology',
+    title: 'Long-term cardiovascular outcomes with Entresto in heart failure with reduced ejection fraction',
+    journal: 'European Heart Journal', year: 2023,
+    authors: 'H. Bergstrom, M. Adeoye +4',
+    doi: '10.1093/eurheartj.2023.5014',
+    organisations: [org('Novartis'), org('Karolinska Institute')],
+    altmetric: 152, citations: 87,
+  },
+  {
+    id: 'p515', area: 'Cardiology',
+    title: 'Sacubitril-valsartan combination therapy reduces hospitalisation in heart failure with reduced ejection fraction',
+    journal: 'Circulation', year: 2022,
+    authors: 'D. Okoro, L. Fernandez +3',
+    doi: '10.1161/circulationaha.2022.5015',
+    organisations: [org('Cleveland Clinic')],
+    altmetric: 118, citations: 94,
+  },
+  {
+    id: 'p516', area: 'Cardiology',
+    title: 'Neprilysin inhibition with sacubitril monotherapy and early cardiac remodelling',
+    journal: 'Journal of Cardiac Failure', year: 2021,
+    authors: 'T. Waweru, C. Bianchi +2',
+    doi: '10.1016/j.cardfail.2021.5016',
+    organisations: [org('Cleveland Clinic')],
+    altmetric: 22, citations: 9,
+    abstract: 'Neprilysin inhibition has emerged as a therapeutic strategy in heart failure. This study evaluates sacubitril monotherapy on natriuretic peptide levels and early markers of cardiac remodelling in a cohort of patients with reduced ejection fraction, independent of concomitant angiotensin receptor blockade.',
+  },
+  {
+    id: 'p517', area: 'Cardiology',
+    title: 'Comparative review of renin-angiotensin system inhibitors and neprilysin inhibitors across chronic cardiovascular and renal disease',
+    journal: 'Nature Reviews Cardiology', year: 2024,
+    authors: 'S. Okonkwo, A. Lindqvist +5',
+    doi: '10.1038/nrcardio.2024.5017',
+    organisations: [org('Karolinska Institute')],
+    altmetric: 44, citations: 17,
+    abstract: 'Angiotensin receptor blockers such as valsartan remain a cornerstone of treatment across hypertension, chronic kidney disease and diabetic nephropathy, with decades of outcome data across large international cohorts and multiple regulatory settings worldwide. In a separate and distinct therapeutic area entirely, this review also surveys emerging neprilysin-targeted agents including sacubitril, discussed here purely in the context of unrelated early-stage oncology biomarker research pipelines with no bearing on the renin-angiotensin discussion above.',
   },
 ];
