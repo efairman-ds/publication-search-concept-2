@@ -62,6 +62,31 @@ function truncateConceptLabel(label: string): string {
   return label.length > CONCEPT_CHIP_MAX_CHARS ? `${label.slice(0, CONCEPT_CHIP_MAX_CHARS)}…` : label;
 }
 
+/** The "connected" gap between the slim search bar and the Interpreted
+ *  Concepts banner (see the mt below InterpretedConceptsBanner's
+ *  Collapse), and — only when a Clarification panel is showing — between
+ *  that banner and the Clarification panel right below it (see the mt
+ *  above the results Collapse, gated on conceptState.pendingClarification
+ *  there). Deliberately *not* used for whatever gap sits immediately
+ *  before "Publications found"/the publication list itself — see
+ *  PRE_LIST_GAP_PX for that, kept as its own constant precisely so it can
+ *  move independently of this one. A plain margin, not tied to either
+ *  element's own height, so it stays correct however tall the banner or
+ *  the panel happen to be. */
+const CONNECTED_BANNER_GAP_PX = 16;
+
+/** The gap immediately before "Publications found"/the publication
+ *  list — double CONNECTED_BANNER_GAP_PX, applied whichever element
+ *  renders directly above the list: the Interpreted Concepts banner
+ *  itself when no Clarification panel intervenes (see the mt above the
+ *  results Collapse), or the Clarification panel's own trailing edge
+ *  when one does (see its mb), so this specific gap stays the same
+ *  regardless of which of the two precedes the list, without touching
+ *  CONNECTED_BANNER_GAP_PX's own bar-to-banner (and, when a Clarification
+ *  panel shows, banner-to-panel) gap. Again a plain margin, not tied to
+ *  any element's own height. */
+const PRE_LIST_GAP_PX = CONNECTED_BANNER_GAP_PX * 2;
+
 const STOPWORDS = new Set([
   'and', 'or', 'not', 'the', 'of', 'for', 'with', 'in', 'on', 'a', 'an', 'to', 'vs', 'from',
   // Generic command scaffolding in a full-sentence query ("show me the
@@ -1074,6 +1099,7 @@ function ExpandablePublicationPreview({
 function SlimSearchBar({
   onBack,
   showFilters,
+  showBackToSearch,
   publicationFilter,
   onPublicationFilterChange,
   sortKey,
@@ -1087,6 +1113,15 @@ function SlimSearchBar({
    *  mounted and visible regardless; only this one row's content is
    *  gated. */
   showFilters: boolean;
+  /** "Back to search" makes sense once the user has actually left the
+   *  initial landing state — either a committed query search (typed +
+   *  Enter) or "View all publications" — so this is just showSlimLayout
+   *  passed through under its own name. Since the bar itself (see
+   *  showFilters above) stays mounted and visible on the plain landing
+   *  state too, this still needs to be its own explicit gate rather than
+   *  assumed true unconditionally — otherwise this control would show up
+   *  before the user has done anything at all. */
+  showBackToSearch: boolean;
   publicationFilter: PublicationFilter;
   onPublicationFilterChange: (f: PublicationFilter) => void;
   sortKey: SortKey;
@@ -1143,31 +1178,35 @@ function SlimSearchBar({
           above — it stays anchored to the same fixed position beyond it,
           independent of the 1440 content column. Icon and label together
           form one clickable control; the label is always visible rather
-          than only on hover, so no tooltip is needed. */}
-      <Box
-        role="button"
-        aria-label="Back to search"
-        onClick={onBack}
-        sx={{
-          position: 'absolute',
-          right: 48,
-          top: '50%',
-          transform: 'translateY(-50%)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 0.5,
-          cursor: 'pointer',
-          color: 'text.secondary',
-          fontSize: 13,
-          fontWeight: 500,
-          letterSpacing: '-0.01em',
-          whiteSpace: 'nowrap',
-          '&:hover': { color: 'primary.main' },
-        }}
-      >
-        <ArrowUp size={16} />
-        Back to search
-      </Box>
+          than only on hover, so no tooltip is needed. Gated on
+          showBackToSearch (see its own doc comment) — everything else
+          about it (styling, position, click behaviour) is unchanged. */}
+      {showBackToSearch ? (
+        <Box
+          role="button"
+          aria-label="Back to search"
+          onClick={onBack}
+          sx={{
+            position: 'absolute',
+            right: 48,
+            top: '50%',
+            transform: 'translateY(-50%)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.5,
+            cursor: 'pointer',
+            color: 'text.secondary',
+            fontSize: 13,
+            fontWeight: 500,
+            letterSpacing: '-0.01em',
+            whiteSpace: 'nowrap',
+            '&:hover': { color: 'primary.main' },
+          }}
+        >
+          <ArrowUp size={16} />
+          Back to search
+        </Box>
+      ) : null}
     </Box>
   );
 }
@@ -2754,20 +2793,30 @@ function InterpretedConceptsBanner({
               Undo
             </Box>
           ) : null}
-          {/* Plain text link, no icon — the only entry point into
-              query-building; the collapsed summary below is otherwise
-              entirely display-only. */}
+          {/* The only entry point into query-building; the collapsed
+              summary below is otherwise entirely display-only. The caret
+              rotates 180° between the two states — collapsed points down
+              ("expand this"), expanded points up ("collapse this") —
+              alongside the existing "Edit concepts"/"Collapse" label
+              swap, not replacing it. */}
           {groups.length > 0 ? (
             <Box
               role="button"
+              aria-expanded={expanded}
+              aria-label={expanded ? 'Collapse concept editor' : 'Edit concepts'}
               onClick={() => setExpanded((v) => !v)}
               sx={{
+                display: 'flex', alignItems: 'center', gap: 0.5,
                 fontSize: 12, fontWeight: 600, letterSpacing: '-0.01em', whiteSpace: 'nowrap',
                 color: 'primary.main', cursor: 'pointer',
                 '&:hover': { color: '#3d4891' },
               }}
             >
               {expanded ? 'Collapse' : 'Edit concepts'}
+              <CaretDown
+                size={13}
+                style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }}
+              />
             </Box>
           ) : null}
         </Box>
@@ -2869,14 +2918,19 @@ function ClarificationPanel({
       display: 'flex',
       flexDirection: 'column',
       gap: 1.5,
-      // This panel always sits between the Interpreted Concepts banner and
-      // the "Publications found" heading (see the page component), so its
-      // own margins are the simplest way to retune just those two gaps
-      // without touching the column's shared `gap` (which also spaces
-      // other, unrelated siblings). mt pulls it closer to the banner above;
-      // mb adds clear separation before the results heading below.
-      mt: '-16px',
-      mb: '24px',
+      // This panel always sits between the Interpreted Concepts banner
+      // (above) and the "Publications found" heading (below, right after
+      // it — see the page component). The gap above is already handled
+      // by the results Collapse's own mt (tuned to land exactly
+      // CONNECTED_BANNER_GAP_PX below the banner when this panel is what
+      // renders first inside it), so this needs no mt of its own. mb
+      // adjusts this panel's own trailing edge of the results Box's
+      // shared `gap: 1.5` (12px, used for spacing *within* that content,
+      // e.g. toolbar-to-table — unrelated, and correctly left alone) up
+      // to PRE_LIST_GAP_PX — the gap immediately before the list, which
+      // this panel sits directly in front of — see that constant's own
+      // comment.
+      mb: `${PRE_LIST_GAP_PX - 12}px`,
     }}>
       <Typography sx={{ fontSize: 15, fontWeight: 700, color: 'primary.main', letterSpacing: '-0.01em' }}>
         Clarification Required
@@ -3280,6 +3334,7 @@ export default function PublicationSearchPage() {
       <SlimSearchBar
         onBack={handleBackToSearch}
         showFilters={showSlimLayout}
+        showBackToSearch={showSlimLayout}
         publicationFilter={publicationFilter}
         onPublicationFilterChange={setPublicationFilter}
         sortKey={sortKey}
@@ -3323,16 +3378,31 @@ export default function PublicationSearchPage() {
             the results list's own fold below, so the two meet in the
             middle. */}
         {/* mt here (not on the banner itself, one level down) pulls the
-            whole collapse 30% closer to the spacer above than the column's
-            own shared `gap` (32px) would otherwise leave it, without
-            touching that gap (which also spaces unrelated siblings below).
+            whole collapse up to CONNECTED_BANNER_GAP_PX below the slim
+            search bar above, once that bar is actually showing
+            (showSlimLayout). That bar is `position: fixed` and only 65px
+            tall (see SlimSearchBar), but the column above this Box
+            reserves 97px of flow space for it before its own `gap` (32px)
+            even applies — this column's own pt (32px) plus the 65px
+            spacer, which only matches the bar's height, not its position.
+            That's 64px of surplus (the pt/spacer mismatch, plus the
+            column's own gap) to cancel before landing CONNECTED_BANNER_
+            GAP_PX below the bar's real bottom edge. See
+            CONNECTED_BANNER_GAP_PX's own comment for how this stays in
+            step with the same gap elsewhere on the page.
+            On the plain landing state (no slim bar, this Box's own content
+            collapsed to zero height anyway) this still needs *some* mt, or
+            its now-negative-margin-less 0-height item would push the
+            search card below it down by this column's own `gap` (32px)
+            more than the original design intended — kept at the original
+            -9.6px here so landing spacing is untouched by the above.
             Deliberately outside BottomAnchoredCollapse: its root clips to a
             measured height via `overflow: hidden`, so a negative margin on
             the *measured* content shifts it upward past its own clip,
             slicing off the banner's top-left/top-right corner radius.
             Shifting this outer, unclipped Box instead moves the whole
             already-sized collapse as one rigid unit. */}
-        <Box sx={{ mt: '-9.6px' }}>
+        <Box sx={{ mt: showSlimLayout ? `${CONNECTED_BANNER_GAP_PX - 64}px` : '-9.6px' }}>
           <BottomAnchoredCollapse in={isCommittedSearch} timeout={500}>
             <Box sx={{
               opacity: bannerVisible ? 1 : 0,
@@ -3433,17 +3503,29 @@ export default function PublicationSearchPage() {
             the column's own gap — the preview itself is untouched; it just
             ends up with slightly less of the viewport to fill, since it's
             still anchored to the bottom. */}
-        {/* Once the slim bar is showing, the flex column's own `gap` (32px)
-            applies at least twice before this block — once after the
-            reserved slim-bar spacer, once after the (now zero-height)
-            collapsed search area, plus once more after the concepts banner
-            for a committed search — for up to 96px total gap above it. -32px
-            here cancels one of those (a flat halving for the "browse full
-            list" expand; a smaller proportional reduction alongside the
-            concepts banner's own gap for a committed search), without
-            touching either element's own size or the gap used everywhere
-            else in this column. */}
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, flex: showSlimLayout ? 'none' : 1, minHeight: 0, mt: showSlimLayout ? '-32px' : '132px', transition: 'margin-top 0.5s ease' }}>
+        {/* Once the slim bar is showing (a committed search), the flex
+            column's own `gap` (32px) applies twice before this block —
+            once after the concepts banner, once after the (now
+            zero-height) collapsed search area — for 64px total above it.
+            This cancels that down to one of two targets, depending on
+            what ends up rendering first inside this Box: when a
+            Clarification panel is pending, that's CONNECTED_BANNER_GAP_PX
+            — the same gap the concepts banner above sits at below the
+            slim search bar (see its own mt) — since the *next* gap, from
+            that panel down to the list, is what's meant to be the wider
+            one (see the panel's own mb); otherwise (no clarification —
+            the banner sits directly above the list) that's PRE_LIST_GAP_PX
+            itself, since this Box's first child *is* the list in that
+            case. See both constants' own comments. Neither element's own
+            size, nor the gap used everywhere else in this column, is
+            touched either way. */}
+        <Box sx={{
+          display: 'flex', flexDirection: 'column', gap: 1.5, flex: showSlimLayout ? 'none' : 1, minHeight: 0,
+          mt: showSlimLayout
+            ? `${(conceptState.pendingClarification ? CONNECTED_BANNER_GAP_PX : PRE_LIST_GAP_PX) - 64}px`
+            : '132px',
+          transition: 'margin-top 0.5s ease',
+        }}>
           {/* Standard (top-anchored) Collapse — the mirror image of the
               concepts banner's BottomAnchoredCollapse above: this folds
               upward (shrinks from the bottom) on close and unfolds
