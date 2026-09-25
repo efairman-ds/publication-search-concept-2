@@ -130,6 +130,53 @@ function publicationHaystack(p: SearchPublication): string {
     .toLowerCase();
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Renders `text` with every case-insensitive, whole-word occurrence of
+ *  any surviving `terms` (the active Interpreted Concepts — see
+ *  computeConceptState's allConcepts) wrapped in a subtle highlight —
+ *  used for a publication title in the committed-results table, so a
+ *  scanning eye can immediately spot which words in the title are what
+ *  the search actually matched on. Longest terms are tried first so a
+ *  multi-word concept ("Elderly patients") claims its full phrase before
+ *  a shorter one that happens to be a substring of it could grab just
+ *  part of it. Word-boundaried, same reasoning as POPULATION_PATTERNS:
+ *  a bare "men" mustn't light up half of "treatment". Returns the plain
+ *  string unchanged when there's nothing to highlight, so callers that
+ *  never pass terms (e.g. the landing preview, which has no interpreted
+ *  query at all) pay no cost and render exactly as before. */
+function highlightConceptTerms(text: string, terms: string[]): ReactNode {
+  const unique = Array.from(new Set(terms.map((t) => t.trim()).filter(Boolean)));
+  if (unique.length === 0) return text;
+  const pattern = unique
+    .sort((a, b) => b.length - a.length)
+    .map(escapeRegExp)
+    .join('|');
+  const re = new RegExp(`\\b(${pattern})\\b`, 'gi');
+  const parts = text.split(re);
+  if (parts.length === 1) return text;
+  return parts.map((part, i) =>
+    i % 2 === 1 ? (
+      <Box
+        key={i}
+        component="span"
+        sx={{
+          bgcolor: (t) => alpha(t.palette.primary.main, 0.12),
+          borderRadius: '3px',
+          fontWeight: 700,
+          px: '2px',
+        }}
+      >
+        {part}
+      </Box>
+    ) : (
+      part
+    ),
+  );
+}
+
 interface FilterOptions {
   /** Explicit OR-match terms, sourced from the surviving (non-removed)
    *  interpreted concepts (see computeConceptState) — takes over matching
@@ -779,6 +826,7 @@ function PublicationRow({
   selected,
   onToggle,
   interactive = true,
+  highlightTerms = [],
 }: {
   pub: SearchPublication;
   selected: boolean;
@@ -787,6 +835,11 @@ function PublicationRow({
    *  appearance, just no hover highlight and a disabled (unselectable)
    *  checkbox. */
   interactive?: boolean;
+  /** The active Interpreted Concepts' labels, highlighted wherever they
+   *  appear in the title below (see highlightConceptTerms) — empty on
+   *  the landing preview, which has no interpreted query to highlight
+   *  against. */
+  highlightTerms?: string[];
 }) {
   return (
     <Box
@@ -816,7 +869,7 @@ function PublicationRow({
         <Typography sx={{
           fontSize: 15, fontWeight: 600, color: 'text.primary', letterSpacing: '-0.01em', lineHeight: 1.4,
         }}>
-          {pub.title}
+          {highlightConceptTerms(pub.title, highlightTerms)}
         </Typography>
         <Typography sx={{
           fontSize: 12, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
@@ -866,6 +919,7 @@ function PublicationsTable({
   onToggleAll,
   pagination,
   interactive = true,
+  highlightTerms = [],
 }: {
   publications: SearchPublication[];
   sortKey: SortKey;
@@ -883,6 +937,10 @@ function PublicationsTable({
    *  checkboxes, and row hover are all disabled, so the preview is purely a
    *  visual snapshot. Always true on the full list view. */
   interactive?: boolean;
+  /** Passed straight through to each PublicationRow — see its own doc
+   *  comment. Omitted (empty) by every call site except the committed-
+   *  results table, which has actual interpreted concepts to highlight. */
+  highlightTerms?: string[];
 }) {
   const allSelected = publications.length > 0 && publications.every((p) => selectedIds.has(p.id));
   const someSelected = !allSelected && publications.some((p) => selectedIds.has(p.id));
@@ -936,6 +994,7 @@ function PublicationsTable({
             selected={selectedIds.has(pub.id)}
             onToggle={() => onToggleRow(pub.id)}
             interactive={interactive}
+            highlightTerms={highlightTerms}
           />
         ))
       )}
@@ -1037,17 +1096,19 @@ function ExpandablePublicationPreview({
         }}
       />
 
-      {/* ~24px above the viewport's bottom edge (16px baseline + 24px extra,
-          then brought down 8px twice) — the wrapper above fills the screen
-          exactly up to the page's own bottom padding (removed while on this
-          initial, unexpanded screen — see the page component), so
-          bottom:24 here lands 24px from the browser window's edge, not just
-          from this box. */}
+      {/* ~32px above the viewport's bottom edge (16px baseline + 24px extra,
+          then brought down 8px twice, then back up 8px once more) — the
+          wrapper above fills the screen exactly up to the page's own
+          bottom padding (removed while on this initial, unexpanded screen
+          — see the page component), so bottom:32 here lands 32px from the
+          browser window's edge, not just from this box. Absolutely
+          positioned, so this offset only ever moves this button itself —
+          nothing else in the layout shifts. */}
       <Box
         sx={{
           position: 'absolute',
           left: '50%',
-          bottom: 24,
+          bottom: 32,
           transform: 'translateX(-50%)',
           opacity: expanded ? 0 : 1,
           pointerEvents: expanded ? 'none' : 'auto',
@@ -1240,6 +1301,14 @@ function SearchLandingCard({
       border: '1px solid',
       borderColor: 'divider',
       borderRadius: '12px',
+      // Soft, low-contrast lift off the page background — deliberately
+      // just a hint of separation, not an elevated/floating card. Same
+      // neutral ink tone already used for shadows elsewhere on the page
+      // (see the "Add concept" suggestions Popper), just far softer: low
+      // opacity, no spread. No x/y offset either — blur alone, spreading
+      // evenly on all sides rather than reading as light falling from
+      // one direction.
+      boxShadow: '0 0 10px rgba(20, 24, 32, 0.06)',
       p: 3,
       display: 'flex',
       flexDirection: 'column',
@@ -1284,50 +1353,17 @@ function SearchLandingCard({
       </Box>
 
       <Box sx={{ opacity: docked ? 0 : 1, transition: 'opacity 0.5s ease' }}>
-        <Typography sx={{ fontSize: 13, color: 'text.secondary', letterSpacing: '-0.01em', textAlign: 'left', mt: -1 }}>
-          Search naturally. Compass handles complex search logic for you.
-        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: -1 }}>
+          <Info size={13} color="#8d96a5" style={{ flexShrink: 0 }} />
+          <Typography sx={{ fontSize: 13, color: 'text.secondary', letterSpacing: '-0.01em', textAlign: 'left' }}>
+            Search naturally. Complex search logic is handled for you.
+          </Typography>
+        </Box>
       </Box>
     </Box>
   );
 }
 
-/** Static informational bar — Boolean logic is handled behind the scenes, so
- *  this exists purely to reassure the user, not as an interactive control. */
-function BooleanInfoBar() {
-  return (
-    <Box sx={{
-      // Matches the search card above exactly, so their left/right edges
-      // align. mx: 'auto' (not alignSelf, which only centers a *direct*
-      // flex child — this now sits one level deeper, inside a plain
-      // opacity-fade wrapper Box, see the page component) centers a
-      // fixed-width block regardless of what kind of parent it's in.
-      width: '918px',
-      mx: 'auto',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 1,
-      bgcolor: (t) => alpha(t.palette.primary.main, 0.08),
-      borderRadius: '10px',
-      px: 2,
-      py: 1.5,
-    }}>
-      <Tooltip
-        title="You don't need to construct search syntax yourself — describe what you're looking for in plain language and Compass handles the rest."
-        placement="top"
-        arrow
-        slotProps={tooltipSlotProps}
-      >
-        <Box component="span" sx={{ display: 'inline-flex', cursor: 'help', color: 'primary.main', flexShrink: 0 }}>
-          <Info size={18} />
-        </Box>
-      </Tooltip>
-      <Typography sx={{ fontSize: 13, fontWeight: 500, color: 'primary.main', letterSpacing: '-0.01em' }}>
-        Boolean operators (AND, OR, NOT) or advanced filters are handled behind the scenes.
-      </Typography>
-    </Box>
-  );
-}
 
 // ── Results view: interpreted concepts + loading interstitial ────────────────
 
@@ -1612,6 +1648,21 @@ const CONCEPT_SYNONYMS: Record<string, string[]> = {
   'Cochlear implant': ['Cochlear implantation'],
 };
 
+/** Every known synonym above, flattened into the same CatalogConcept
+ *  shape as CONCEPT_CATALOG so the "Add concept" search can find and
+ *  add one directly — e.g. searching "IOL" finds it even though "IOL"
+ *  itself is never a CONCEPT_DICTIONARY pattern, only ever listed here
+ *  as a synonym of "Intraocular lens (IOL)". `category` is the parent's
+ *  own category, so a synonym added this way lands in the same category
+ *  box a canonical concept would (see CustomConceptSearch); `term` is
+ *  the synonym text itself, not the parent's, so it actually matches on
+ *  the word the user searched for. */
+const SYNONYM_CATALOG: CatalogConcept[] = Object.entries(CONCEPT_SYNONYMS).flatMap(([parentLabel, synonyms]) => {
+  const parent = CONCEPT_DICTIONARY.find((e) => e.label === parentLabel);
+  if (!parent) return [];
+  return synonyms.map((s) => ({ label: s, category: parent.category, term: s.toLowerCase() }));
+});
+
 const CURRENT_YEAR = new Date().getFullYear();
 
 /** One recognised structured filter pulled out of the raw query text —
@@ -1846,6 +1897,15 @@ interface DisplayConcept {
    *  ConceptState.matchPredicates. */
   predicate?: (p: SearchPublication) => boolean;
   removed: boolean;
+  /** True for a concept the user added themselves — either promoted from
+   *  a green synonym suggestion, or picked via the "Add concept" search
+   *  (see computeConceptState) — as opposed to one the query itself
+   *  matched. Drives each CategoryBox's "N concepts added" ticker
+   *  (see its own addedCount), which counts both kinds together: from
+   *  the user's point of view, both are "a concept I added," whichever
+   *  category box it happens to land in. Left undefined (falsy) for
+   *  everything the query matched on its own. */
+  addedManually?: boolean;
 }
 
 interface ConceptState {
@@ -2014,22 +2074,30 @@ function computeConceptState(
   // left out of the returned list, so Query details can still show it
   // (see the doc comment above and InterpretedConceptsBanner).
   const allConcepts: DisplayConcept[] = [];
+  // A synonym the user has activated from a concept's green "+" list
+  // joins the same category as its own removable chip — see
+  // synonymConceptKey/handleAddSynonym. Its presence in `addedSynonyms`
+  // *is* the toggle: removing the chip deletes it from that list
+  // (returning it to being offered again) rather than adding to
+  // removedConceptKeys, which would have no way back — so unlike every
+  // other push here, there's no separate removed state to track. Shared
+  // by every concept source below (query matches *and* concepts added
+  // via "Add concept") — CategoryBox offers the same green "+" list
+  // regardless of which one a concept came from (see its own
+  // synonymOptions), so this has to fold addedSynonyms in for both the
+  // same way, or a synonym promoted from a manually-added concept would
+  // sit in state with nothing ever reading it back out.
+  const pushSynonymsFor = (key: string, category: string, removed: boolean) => {
+    if (removed) return;
+    for (const syn of addedSynonyms[key] ?? []) {
+      allConcepts.push({ key: synonymConceptKey(key, syn), category, label: syn, term: syn, removed: false, addedManually: true });
+    }
+  };
   for (const m of matches) {
     const key = conceptKey(m.category, m.label);
     const removed = removedConceptKeys.has(key);
     allConcepts.push({ key, category: m.category, label: m.label, term: m.pattern, removed });
-    // A synonym the user has activated from this concept's Query details
-    // list joins the same category as its own removable chip — see
-    // synonymConceptKey/handleAddSynonym. Its presence in `addedSynonyms`
-    // *is* the toggle: removing the chip deletes it from that list
-    // (returning it to Query details) rather than adding to
-    // removedConceptKeys, which would have no way back — so unlike every
-    // other push here, there's no separate removed state to track.
-    if (!removed) {
-      for (const syn of addedSynonyms[key] ?? []) {
-        allConcepts.push({ key: synonymConceptKey(key, syn), category: m.category, label: syn, term: syn, removed: false });
-      }
-    }
+    pushSynonymsFor(key, m.category, removed);
   }
   // Each DOI the query names becomes its own concept/chip, independently
   // removable — but see matchPredicates below, where their individual
@@ -2074,14 +2142,31 @@ function computeConceptState(
     const key = conceptKey('Disease / Indication', indication);
     allConcepts.push({ key, category: 'Disease / Indication', label: indication, term: null, removed: removedConceptKeys.has(key) });
   }
-  // Manually added via the Custom section's search (see CustomConceptSearch)
-  // — appended last so Custom reads as an extension of the query's own
-  // interpreted concepts rather than mixed in among them. Gated by
-  // removedConceptKeys exactly like every other concept, so its chip's ×
-  // (and Undo) work through the same existing mechanism, no special case.
+  // Manually added via the "Add concept" search (see CustomConceptSearch)
+  // — appended last so these read as an extension of the query's own
+  // interpreted concepts rather than mixed in among them. Filed under
+  // the concept's own real category (c.category, e.g. Drug/Disease /
+  // Indication/Biomarker/Device — whatever CONCEPT_CATALOG already
+  // tagged it as) rather than a separate "Custom" bucket, so it lands in
+  // the same category box a query match of the same thing would — see
+  // ConceptDetails/groupConceptsByCategory, which groups purely by this
+  // `category` field and has no "Custom" special-casing of its own.
+  // addedManually: true (see DisplayConcept) so it counts towards that
+  // category's "N concepts added" ticker exactly like a promoted synonym
+  // does. Gated by removedConceptKeys exactly like every other concept,
+  // so its chip's × (and Undo) work through the same existing mechanism,
+  // no special case. Also runs through pushSynonymsFor exactly like a
+  // query match does — CONCEPT_SYNONYMS doesn't care whether its parent
+  // came from the query or from "Add concept", and CategoryBox's own
+  // green "+" list already offers this concept's synonyms either way
+  // (see synonymOptions), so the fold-in has to be equally unconditional
+  // or a synonym promoted here would set addedSynonyms with nothing ever
+  // reading it back out — a chip that silently never appears.
   for (const c of customConcepts) {
-    const key = conceptKey('Custom', c.label);
-    allConcepts.push({ key, category: 'Custom', label: c.label, term: c.term, removed: removedConceptKeys.has(key) });
+    const key = conceptKey(c.category, c.label);
+    const removed = removedConceptKeys.has(key);
+    allConcepts.push({ key, category: c.category, label: c.label, term: c.term, removed, addedManually: true });
+    pushSynonymsFor(key, c.category, removed);
   }
 
   const active = allConcepts.filter((c) => !c.removed);
@@ -2188,16 +2273,17 @@ const CONCEPT_CHIP_HEIGHT = '28px';
  *  rather than stretching; several of these then sit side by side (see
  *  ConceptDetails) rather than one per line.
  *
- *  Label row: the category name, plus — once at least one synonym has
- *  actually been added to this category — a small "N concepts added"
- *  caption at the far right of that same row (synonym-derived concepts
- *  only; a category's originally-matched concept(s) don't count towards
- *  this). Beneath that: every concept as a removable (blue, "×") chip,
- *  immediately followed in the same wrapping row by any synonyms still
- *  available to add, each as its own addable (green, "+") chip — no
- *  "Synonyms:" text label; the colour/icon difference alone marks a chip
- *  as not-yet-added, and clicking one promotes it into a blue chip in
- *  this same row. */
+ *  Label row: the category name, plus — once at least one concept has
+ *  actually been added to this category, whether promoted from a green
+ *  synonym suggestion or picked via "Add concept" — a "(N)" count right
+ *  on that same title (see DisplayConcept.addedManually; a category's
+ *  originally-matched concept(s) don't count towards this), omitted
+ *  entirely rather than showing "(0)" once nothing's been added. Beneath
+ *  that: every concept as a removable (blue, "×") chip, immediately
+ *  followed in the same wrapping row by any synonyms still available to
+ *  add, each as its own addable (green, "+") chip — no "Synonyms:" text
+ *  label; the colour/icon difference alone marks a chip as not-yet-added, and
+ *  clicking one promotes it into a blue chip in this same row. */
 function CategoryBox({
   category,
   concepts,
@@ -2211,34 +2297,34 @@ function CategoryBox({
   addedSynonyms: Record<string, string[]>;
   onAddSynonym: (parentKey: string, synonym: string) => void;
 }) {
+  // A synonym can also have been added directly through the "Add concept"
+  // search (see SYNONYM_CATALOG) rather than promoted from this green "+"
+  // — checking activeLabels as well as addedSynonyms keeps this list from
+  // still offering one that's already active in this category by that
+  // other route.
+  const activeLabels = new Set(concepts.map((c) => c.label));
   const synonymOptions = concepts
     .filter((c) => parseSynonymConceptKey(c.key) === null)
     .flatMap((c) => (CONCEPT_SYNONYMS[c.label] ?? [])
-      .filter((s) => !(addedSynonyms[c.key] ?? []).includes(s))
+      .filter((s) => !(addedSynonyms[c.key] ?? []).includes(s) && !activeLabels.has(s))
       .map((synonym) => ({ parentKey: c.key, synonym })));
-  const addedCount = concepts.filter((c) => parseSynonymConceptKey(c.key) !== null).length;
+  const addedCount = concepts.filter((c) => c.addedManually).length;
 
   return (
     <Box sx={{
       bgcolor: '#fff', borderRadius: CATEGORY_CONTAINER_RADIUS, ...CATEGORY_CONTAINER_PADDING,
       display: 'flex', flexDirection: 'column', gap: 0.75, minWidth: 0,
     }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+        {/* The "(N)" suffix — right on the title itself, same styling,
+            rather than a separate caption — so it reads as "how many are
+            in this category that I added", not additional metadata
+            competing with the title for attention. Omitted entirely at
+            zero rather than showing "(0)": absence already says "nothing
+            added here" without a redundant explicit zero. */}
         <Typography sx={CATEGORY_LABEL_SX}>
-          {category}
+          {category}{addedCount > 0 ? ` (${addedCount})` : ''}
         </Typography>
-        {addedCount > 0 ? (
-          // All-caps like the category label itself (see CATEGORY_LABEL_SX),
-          // but a shade lighter and not bold — supporting metadata about
-          // the category, not another label competing with it or with the
-          // concept chips below for attention.
-          <Typography sx={{
-            fontSize: 10, fontWeight: 500, letterSpacing: '0.04em', textTransform: 'uppercase',
-            color: (t) => alpha(t.palette.text.disabled, 0.65), whiteSpace: 'nowrap',
-          }}>
-            {addedCount} concept{addedCount === 1 ? '' : 's'} added
-          </Typography>
-        ) : null}
       </Box>
       <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 0.75 }}>
         {concepts.map((c) => <RemovableChip key={c.key} label={c.label} onRemove={() => onRemove(c.key)} />)}
@@ -2313,16 +2399,21 @@ function relatedCatalogSuggestions(
   return [...prioritized, ...rest].slice(0, limit);
 }
 
-/** All of the banner's category containers plus "Custom" (the add-a-
- *  concept category), shown once the banner is expanded (see
- *  InterpretedConceptsBanner) — never gated behind a dropdown or popover
- *  of its own. Laid out as one horizontal, wrapping row — category
- *  container → category container → ... → "Custom" — so several
- *  categories sit side by side where there's room, rather than one per
- *  line. "Custom" is the last item in that same row, kept visually
- *  distinct (its own, slightly-off-white background — see its own Box
- *  below) from the categories actually interpreted from the query, even
- *  though it's right alongside them. */
+/** All of the banner's category containers plus "Add concept" (the
+ *  add-a-concept control — not a category of its own; see
+ *  computeConceptState, which files anything added through it under its
+ *  own real category, Drug/Disease / Indication/Biomarker/Device/…,
+ *  same as a query match of the same thing would be), shown once the
+ *  banner is expanded (see InterpretedConceptsBanner) — never gated
+ *  behind a dropdown or popover of its own. Laid out as one horizontal,
+ *  wrapping row — category container → category container → ... →
+ *  "Add concept" — so several categories sit side by side where there's
+ *  room, rather than one per line. "Add concept" is the last item in
+ *  that same row, kept visually distinct (its own, slightly-off-white
+ *  background — see its own Box below) from the categories actually
+ *  interpreted from the query, even though it's right alongside them —
+ *  a visual cue that it's the *mechanism* for adding a concept, not a
+ *  bucket that collects them. */
 function ConceptDetails({
   groups,
   activeConcepts,
@@ -2353,7 +2444,7 @@ function ConceptDetails({
           onAddSynonym={onAddSynonym}
         />
       ))}
-      {/* "Custom" — same container shape as every CategoryBox (radius,
+      {/* "Add concept" — same container shape as every CategoryBox (radius,
           padding, label-then-content), only the background differs, and
           only very slightly (a flat off-white, not grey, not an
           alpha-tinted mix of the page's own lavender-grey background),
@@ -2366,14 +2457,17 @@ function ConceptDetails({
           off-white that would read as its own, more separate card. The
           search field inside (see CustomConceptSearch) is pure white, so
           it still stands out clearly against this slightly-off container
-          rather than blending into it. */}
+          rather than blending into it. Unlike every CategoryBox above,
+          this one never holds any chips of its own — what's added here
+          shows up in its own real category box instead (see
+          computeConceptState), so this stays purely a control. */}
       <Box sx={{
         bgcolor: '#FAFAF8',
         borderRadius: CATEGORY_CONTAINER_RADIUS, ...CATEGORY_CONTAINER_PADDING,
         display: 'flex', flexDirection: 'column', gap: 0.75, minWidth: 200,
       }}>
         <Typography sx={CATEGORY_LABEL_SX}>
-          Custom
+          Add concept
         </Typography>
         <CustomConceptSearch concepts={activeConcepts} onAdd={onAdd} />
       </Box>
@@ -2400,14 +2494,26 @@ function CustomConceptSearch({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const excludeLabels = useMemo(() => new Set(concepts.map((c) => c.label)), [concepts]);
+  // Every already-active concept's own category — there's no "Custom"
+  // category to exclude any more (see computeConceptState), so this is
+  // just the plain set, straight from what's already showing.
   const presentCategories = useMemo(
-    () => new Set(concepts.filter((c) => c.category !== 'Custom').map((c) => c.category)),
+    () => new Set(concepts.map((c) => c.category)),
     [concepts],
   );
 
   const query = inputValue.trim().toLowerCase();
+  // Typing searches known synonyms too (see SYNONYM_CATALOG), not just
+  // canonical CONCEPT_CATALOG terms — "IOL" is never its own dictionary
+  // entry, only ever a synonym of "Intraocular lens (IOL)", so without
+  // this a search for it would silently find nothing. The empty-input
+  // "related suggestions" default below deliberately stays
+  // CONCEPT_CATALOG-only — surfacing raw synonyms unprompted there would
+  // read as noise rather than a helpful suggestion.
   const options = query
-    ? CONCEPT_CATALOG.filter((c) => !excludeLabels.has(c.label) && c.label.toLowerCase().includes(query)).slice(0, 8)
+    ? [...CONCEPT_CATALOG, ...SYNONYM_CATALOG]
+        .filter((c) => !excludeLabels.has(c.label) && c.label.toLowerCase().includes(query))
+        .slice(0, 8)
     : relatedCatalogSuggestions(excludeLabels, presentCategories, 5);
 
   const handleAdd = (option: CatalogConcept) => {
@@ -2439,7 +2545,7 @@ function CustomConceptSearch({
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onFocus={() => setOpen(true)}
-            placeholder="Add a concept..."
+            placeholder="Search for a concept"
             fullWidth
             sx={{
               '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
@@ -3165,9 +3271,10 @@ export default function PublicationSearchPage() {
     triggerBriefRefresh();
   };
 
-  /** Fires from the Custom section's search (see CustomConceptSearch) —
+  /** Fires from the "Add concept" search (see CustomConceptSearch) —
    *  adds a manually-picked concept, which computeConceptState folds into
-   *  its own "Custom" category box and matchOrTerms on the next recompute. */
+   *  its own real category box (the option's own `category`, not a
+   *  separate "Custom" one) and matchOrTerms on the next recompute. */
   const handleAddCustomConcept = (option: CatalogConcept) => {
     setCustomConcepts((prev) => [...prev, option]);
     setUndoStack((prev) => [...prev, { kind: 'removeCustomConcept', label: option.label }]);
@@ -3214,6 +3321,17 @@ export default function PublicationSearchPage() {
   const conceptState = useMemo(
     () => computeConceptState(committedQuery, clarificationResolution, removedConceptKeys, addedSynonyms, customConcepts),
     [committedQuery, clarificationResolution, removedConceptKeys, addedSynonyms, customConcepts],
+  );
+
+  // Every surviving (non-removed) concept's own display label — what
+  // highlightConceptTerms lights up inside each result's title below,
+  // so a scanning eye can see which words the search actually matched
+  // on. Labels, not `term` (matchOrTerms' lowercase matching pattern) —
+  // a label is what the banner itself already shows the user, so this
+  // stays visually consistent with the chips they're comparing against.
+  const conceptHighlightTerms = useMemo(
+    () => conceptState.allConcepts.filter((c) => !c.removed).map((c) => c.label),
+    [conceptState.allConcepts],
   );
 
   // The results view's own list, driven by the frozen `committedQuery`
@@ -3437,12 +3555,16 @@ export default function PublicationSearchPage() {
             removed; see SearchCapsule. This keeps working the same way for a
             committed search as for the "browse full list" expand, since both
             now drive the same `showSlimLayout` flag.
-            mt pushes the search area down for a more centred vertical
-            balance against the (now shorter) preview below. Since the
-            preview is the flex:1 item that fills whatever's left down to
-            the bottom of the viewport, this fixed amount comes straight out
-            of its height — the preview shrinks by exactly this much, its
-            bottom edge/button position are otherwise untouched.
+            mt pushes the search area down — for a more centred vertical
+            balance against the (now shorter) preview below, and for
+            breathing room below the fixed top bar above (see
+            SlimSearchBar; empty here on the plain landing state, but
+            still occupying the same space at the very top of the
+            viewport). Since the preview is the flex:1 item that fills
+            whatever's left down to the bottom of the viewport, this
+            fixed amount comes straight out of its height — the preview
+            shrinks by exactly this much, its bottom edge/button position
+            are otherwise untouched.
             The margin lives on this wrapping Box rather than on Collapse
             itself (or as a separate spacer flex item, which would pick up
             an extra `gap` on top of itself): Collapse drives its own
@@ -3450,7 +3572,7 @@ export default function PublicationSearchPage() {
             over — and so completely swallow — any transition declared via
             `sx` on that same element, leaving the margin to snap instantly
             instead of animating alongside it. */}
-        <Box sx={{ mt: showSlimLayout ? 0 : '50px', transition: 'margin-top 0.5s ease' }}>
+        <Box sx={{ mt: showSlimLayout ? 0 : '80px', transition: 'margin-top 0.5s ease' }}>
           <Collapse in={!showSlimLayout} timeout={500}>
             {/* Fades out over the same 500ms as the Collapse's own height
                 animation (rather than being left to the height animation
@@ -3458,8 +3580,8 @@ export default function PublicationSearchPage() {
                 away in place instead of just shrinking.
                 This opacity is applied individually to each piece below
                 (the heading block, the "Find publications" button, the
-                helper text, BooleanInfoBar) rather than once on a shared
-                wrapper around all of them — SearchCapsule lives in here too
+                helper text) rather than once on a shared wrapper around
+                all of them — SearchCapsule lives in here too
                 (see SearchLandingCard) and, once docked, escapes via its
                 own `position: fixed` to stay visible/anchored in the slim
                 bar; opacity is a compositing property that still applies to
@@ -3477,7 +3599,7 @@ export default function PublicationSearchPage() {
                   Find publications to start your workspace
                 </Typography>
                 <Typography sx={{ fontSize: 15, fontWeight: 400, color: 'text.secondary', letterSpacing: '-0.01em' }}>
-                  Describe the treatment, disease or research topic you're exploring. Compass identifies relevant scientific concepts and publications for you.
+                  Describe the treatment, disease or research topic you're exploring.
                 </Typography>
               </Box>
 
@@ -3488,9 +3610,6 @@ export default function PublicationSearchPage() {
                   onSubmit={handleFindPublications}
                   docked={showSlimLayout}
                 />
-                <Box sx={{ opacity: showSlimLayout ? 0 : 1, transition: 'opacity 0.5s ease' }}>
-                  <BooleanInfoBar />
-                </Box>
               </Box>
             </Box>
           </Collapse>
@@ -3593,6 +3712,7 @@ export default function PublicationSearchPage() {
                         onToggleRow={toggleRow}
                         onToggleAll={() => toggleAll(resultsSorted)}
                         pagination={{ page, pageCount: resultsPageCount, onChange: setPage }}
+                        highlightTerms={conceptHighlightTerms}
                       />
                     </Box>
                   </Box>
